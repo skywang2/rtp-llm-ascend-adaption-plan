@@ -4,6 +4,40 @@
 
 ---
 
+## 适配状态
+
+> 基于 `rtp-llm-npu` 代码检查结果，当前各适配项的状态如下：
+
+### 已适配项 ✅🟢
+
+| 适配项 | 已适配代码 | 文件位置 |
+|--------|-----------|---------|
+| DeviceType.Ascend | `DeviceType.Ascend = 6` | device_type.py L14 |
+| AscendImpl 基础框架 | `class AscendImpl(GpuImpl)` 含 `get_device_id`、`_get_mem_info`、`support_dio_load` | device_impl.py L696-710 |
+| AscendImpl 注册 | `DeviceType.Ascend → AscendImpl` | device/__init__.py L22-23 |
+| is_ascend() 函数 | `get_device_type() == DeviceType.Ascend` | device_type.py L44-45 |
+| AscendF16Linear | `class AscendF16Linear(LinearBase)` + `LinearFactory.register` | impl/ascend/f16_linear.py, __init__.py |
+| MoE BF16 Fallback | `class AscendBf16FallbackStrategy(MoeStrategy)` | impl/ascend/strategy/pytorch_fallback.py |
+| MoE Ascend 注册 | `DeviceType.Ascend → AscendBf16FallbackStrategy` | fused_moe/__init__.py L62-70 |
+| HCCL 链接配置 | `.bazelrc` 中 `--linkopt="-lhccl"`，`def.bzl` 中 `-DUSE_C10D_HCCL` | 构建配置 |
+
+### 未适配项 ❌🔴
+
+| 适配项 | 说明 |
+|--------|------|
+| AscendImpl MXFP8 方法 | 未重写 per_block_cast_to_fp8、requant_weight_ue8m0 |
+| ModelSlimConfig | quant_config.py 中无相关代码 |
+| load_from_ckpt ModelSlim 检测 | 无 quant_model_description.json 检测 |
+| requant_weight_ue8m0 移除 | per_block_fp8_quant_weight.py L780 仍调用 |
+| per_block_cast_to_fp8 替换 | per_block_fp8_quant_weight.py L847 仍调用原函数 |
+| NpuFp8MXFP8Linear | 无 ascend MXFP8 Linear 实现 |
+| NpuMoEMXFP8Executor | 无 ascend MXFP8 MoE 实现 |
+| DeepGEMM wrapper 修改 | has_deep_gemm/is_deep_gemm_e8m0_used 未改 |
+| NCCL→HCCL (运行时) | collective_torch.py 仍用 nccl，backend_manager.py 仍 backend="nccl" |
+| NZ 格式转换 | 无 npu_format_cast 调用 |
+
+---
+
 ## 一、概述
 
 ### 1.1 目标
@@ -12,25 +46,27 @@
 
 ### 1.2 核心替换
 
-| 序号 | 工作项 | CUDA 实现 | NPU 替代 |
-|------|--------|----------|---------|
-| 1 | 权重量化 | `per_block_cast_to_fp8` | `torch_npu.npu_dynamic_mx_quant` |
-| 2 | Linear GEMM | `deep_gemm.fp8_gemm_nt` | `torch_npu.npu_quant_matmul` |
-| 3 | MoE GEMM | `deep_gemm.masked_fp8_gemm` | `torch_npu.npu_grouped_matmul_swiglu_quant_v2` |
-| 4 | E8M0 转换 | `requant_weight_ue8m0` | **移除**（NPU 原生） |
+| 序号 | 工作项 | CUDA 实现 | NPU 替代 | 状态 |
+|------|--------|----------|---------|------|
+| 1 | 权重量化 | `per_block_cast_to_fp8` | `torch_npu.npu_dynamic_mx_quant` | ❌🔴 |
+| 2 | Linear GEMM | `deep_gemm.fp8_gemm_nt` | `torch_npu.npu_quant_matmul` | ❌🔴 |
+| 3 | MoE GEMM | `deep_gemm.masked_fp8_gemm` | `torch_npu.npu_grouped_matmul_swiglu_quant_v2` | ❌🔴 |
+| 4 | E8M0 转换 | `requant_weight_ue8m0` | **移除**（NPU 原生） | ❌🔴 |
 
 ### 1.3 范围
 
 | 路径 | 预处理 | 配置层 | 权重层 | 推理层 |
 |------|--------|--------|--------|--------|
-| 静态量化 | ModelSlim | `ModelSlimConfig` ➕ | `ModelSlimWeight` ➕ | `NpuFp8MXFP8Linear` ➕ |
-| 动态量化 | 无 | `Fp8BlockWiseQuantConfig` ✅ | `LoadQuantPerBlockFp8Weight` 🔄 | 同静态 |
+| 静态量化 | ModelSlim ❌🔴 | `ModelSlimConfig` ➕❌🔴 | `ModelSlimWeight` ➕❌🔴 | `NpuFp8MXFP8Linear` ➕❌🔴 |
+| 动态量化 | 无 | `Fp8BlockWiseQuantConfig` ✅🟢 | `LoadQuantPerBlockFp8Weight` 🔄❌🔴 | 同静态 |
 
 ---
 
 ## 二、Device 层适配
 
-### 2.1 新增 DeviceType
+### 2.1 新增 DeviceType ✅🟢
+
+> ✅🟢 **该部分已在开发版本中适配**：`DeviceType.Ascend = 6` 已定义于 `device_type.py` L14，`is_ascend()` 函数已实现于 `device_type.py` L44-45。
 
 **文件**：`rtp_llm/device/device_type.py` L7-13
 
@@ -39,17 +75,21 @@ class DeviceType(IntEnum):
     Cpu = 0
     Cuda = 1
     ...
-    Npu = 6  # ➕ 新增
+    Ascend = 6  # ✅🟢 已适配
 ```
 
-### 2.2 新增 NpuImpl
+### 2.2 新增 AscendImpl ✅🟢 基础框架已适配 / ❌🔴 MXFP8 方法未适配
+
+> ✅🟢 **AscendImpl 基础框架已在开发版本中适配**：`class AscendImpl(GpuImpl)` 已实现于 `device_impl.py` L696-710，包含 `get_device_id`、`_get_mem_info`、`support_dio_load` 方法。该部分已在开发版本中适配。
+>
+> ❌🔴 **MXFP8 相关方法尚未适配**：以下 `per_block_cast_to_fp8`、`convert_fp8_weight_params`、`requant_weight_ue8m0` 等方法尚未重写，仍保持 CUDA 原实现。
 
 **文件**：`rtp_llm/device/device_impl.py`
 
 **设计**：继承 `GpuImpl`，重写 MXFP8 相关方法，不重写的方法自动继承。
 
 ```python
-class NpuImpl(GpuImpl):
+class AscendImpl(GpuImpl):
     """NPU 设备实现，参考 RocmImpl (L696) 的继承模式"""
 
     @property
@@ -58,7 +98,7 @@ class NpuImpl(GpuImpl):
         return 910  # Ascend 910
 
     def per_block_cast_to_fp8(self, weight, group_size=128):
-        """🔄 替换：使用 NPU 原生 MXFP8 量化算子
+        """🔄 ❌🔴 替换：使用 NPU 原生 MXFP8 量化算子
 
         CUDA 原实现: per_block_cast_to_fp8(weight, group_size) → FP8 + FP32 scale
         NPU 替代: torch_npu.npu_dynamic_mx_quant → FP8 + E8M0 scale (原生)
@@ -79,14 +119,14 @@ class NpuImpl(GpuImpl):
         return weight_fp8, scale
 
     def convert_fp8_weight_params(self, weight, weight_scale):
-        """🔄 替换：NPU 无需 FP8 格式转换（e4m3fnuz 等）
+        """🔄 ❌🔴 替换：NPU 无需 FP8 格式转换（e4m3fnuz 等）
 
         CUDA 原实现: ROCm 需要转 e4m3fnuz, scale × 2
         NPU: 直接返回，无需转换
         """
         return [weight, weight_scale]
 
-    # 🗑️ 不实现以下方法（NPU 原生支持 E8M0 + MX 格式）
+    # 🗑️ ❌🔴 不实现以下方法（NPU 原生支持 E8M0 + MX 格式）
     # def requant_weight_ue8m0(self, weight, scale):  # 不需要
     # def swizzle_blockscale(self, scale):            # 不需要
 
@@ -97,7 +137,9 @@ class NpuImpl(GpuImpl):
     # convert_fp4_gemm_weight_params (L510)
 ```
 
-### 2.3 注册 NpuImpl
+### 2.3 注册 AscendImpl ✅🟢
+
+> ✅🟢 **该部分已在开发版本中适配**：`DeviceType.Ascend → AscendImpl` 注册已实现于 `device/__init__.py` L22-23。该部分已在开发版本中适配。
 
 **文件**：`rtp_llm/device/__init__.py` L11-23
 
@@ -107,17 +149,17 @@ def get_device_cls(type: DeviceType):
         return CudaImpl
     elif type == DeviceType.ROCm:
         return RocmImpl
-    elif type == DeviceType.Npu:        # ➕ 新增
-        return NpuImpl
+    elif type == DeviceType.Ascend:   # ✅🟢 已适配
+        return AscendImpl
     ...
 ```
 
-### 2.4 DeepGEMM Wrapper 适配
+### 2.4 DeepGEMM Wrapper 适配 ❌🔴
 
 **文件**：`rtp_llm/models_py/kernels/cuda/deepgemm_wrapper.py`
 
 ```python
-# 🗑️ NPU 场景下这些函数返回 False
+# 🗑️ ❌🔴 NPU 场景下这些函数返回 False
 @functools.cache
 def has_deep_gemm() -> bool:
     if get_current_device().arch == 910:  # NPU
@@ -133,9 +175,9 @@ def is_deep_gemm_e8m0_used() -> bool:
 
 ---
 
-## 三、配置层适配
+## 三、配置层适配 ❌🔴
 
-### 3.1 保留 Fp8BlockWiseQuantConfig
+### 3.1 保留 Fp8BlockWiseQuantConfig ✅🟢
 
 **文件**：`rtp_llm/config/quant_config.py` L376-404
 
@@ -153,15 +195,15 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
         return "fp8"  # ✅ 保留
 
     def get_supported_compute_dtypes(self) -> List[torch.dtype]:
-        # 🔄 验证 NPU 是否支持 torch.float8_e4m3fn
+        # 🔄 ❌🔴 验证 NPU 是否支持 torch.float8_e4m3fn
         return [torch.bfloat16]  # ✅ NPU 支持 BF16
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
-        # 🔄 验证 NPU KV Cache FP8 支持
+        # 🔄 ❌🔴 验证 NPU KV Cache FP8 支持
         return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
 ```
 
-### 3.2 修改 load_from_ckpt — 新增 ModelSlim 检测
+### 3.2 修改 load_from_ckpt — 新增 ModelSlim 检测 ❌🔴
 
 **文件**：`rtp_llm/config/quant_config.py` L99-273
 
@@ -172,7 +214,7 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
 def load_from_ckpt(cls, ckpt_path: str) -> Optional["QuantizationConfig"]:
     # ... 现有 smoothquant.ini / pertensorquant.ini 检测 ...
 
-    # ➕ 新增: ModelSlim 检测
+    # ➕ ❌🔴 新增: ModelSlim 检测
     modelslim_config_path = os.path.join(ckpt_path, "quant_model_description.json")
     if os.path.exists(modelslim_config_path):
         with open(modelslim_config_path, "r") as f:
@@ -182,7 +224,7 @@ def load_from_ckpt(cls, ckpt_path: str) -> Optional["QuantizationConfig"]:
     # ... 现有 config.json 检测 ...
 ```
 
-### 3.3 新增 ModelSlimConfig
+### 3.3 新增 ModelSlimConfig ❌🔴
 
 **文件**：`rtp_llm/config/quant_config.py` ➕ 新增
 
@@ -233,15 +275,15 @@ class ModelSlimConfig(QuantizationConfig):
         return cls(bits=8, group_size=128, is_quanted=True)
 ```
 
-### 3.4 注册 ModelSlimConfig
+### 3.4 注册 ModelSlimConfig ❌🔴
 
 ModelSlimConfig 继承 `QuantizationConfig`，通过 `__init_subclass__` 自动注册到 `_registry`，`from_config` 和 `load_from_ckpt` 会自动匹配。
 
 ---
 
-## 四、权重层适配
+## 四、权重层适配 ❌🔴
 
-### 4.1 静态量化：修改 PerBlockFp8Weight._postprocess
+### 4.1 静态量化：修改 PerBlockFp8Weight._postprocess ❌🔴
 
 **文件**：`rtp_llm/model_loader/per_block_fp8_quant_weight.py` L761-808
 
@@ -275,7 +317,7 @@ def _postprocess(self, tensor, device, load_config):
             "scale", scale_weight
         )
 
-        # 🗑️ 移除这段: NPU 不需要 requant_weight_ue8m0
+        # 🗑️ ❌🔴 移除这段: NPU 不需要 requant_weight_ue8m0
         # if is_deep_gemm_e8m0_used():
         #     kernel_weight, scale_weight = requant_weight_ue8m0(
         #         kernel_weight, scale_weight
@@ -292,7 +334,7 @@ def _postprocess(self, tensor, device, load_config):
 - 所以 NPU 走非 E8M0 路径，`requant_weight_ue8m0` 分支自然不执行
 - 但建议**直接删除**这段死代码，保持代码清晰
 
-### 4.2 动态量化：修改 LoadQuantPerBlockFp8Weight._load_raw_tensor
+### 4.2 动态量化：修改 LoadQuantPerBlockFp8Weight._load_raw_tensor ❌🔴
 
 **文件**：`rtp_llm/model_loader/per_block_fp8_quant_weight.py` L854-886
 
@@ -306,8 +348,8 @@ def _load_raw_tensor(self, tensor_source, layer_id, device, load_config):
     res = {}
     scale = None
     if self.scale:
-        # 🔄 NPU 替换: per_block_cast_to_fp8 → npu_dynamic_mx_quant
-        if isinstance(load_config.exported_device, NpuImpl):
+        # 🔄 ❌🔴 NPU 替换: per_block_cast_to_fp8 → npu_dynamic_mx_quant
+        if isinstance(load_config.exported_device, AscendImpl):
             # NPU 路径: 原生 MXFP8 量化, 直接输出 E8M0 scale
             quant_kernel, scale = torch_npu.npu_dynamic_mx_quant(
                 kernel.get(self.kernel.name),
@@ -341,9 +383,9 @@ def _load_raw_tensor(self, tensor_source, layer_id, device, load_config):
 **关键点**：
 - NPU 的 `npu_dynamic_mx_quant` 直接输出 `float8_e8m0fnu` 格式的 scale
 - 不需要后续的 `requant_weight_ue8m0` 转换
-- CUDA 路径保持不变，通过 `isinstance(NpuImpl)` 分流
+- CUDA 路径保持不变，通过 `isinstance(AscendImpl)` 分流
 
-### 4.3 新增 ModelSlimWeight
+### 4.3 新增 ModelSlimWeight ❌🔴
 
 **文件**：`rtp_llm/model_loader/modelslim_weight.py` ➕ 新建
 
@@ -435,16 +477,25 @@ class ModelSlimWeight(CompositeWeight, QuantWeight):
 
 ## 五、推理层适配
 
-### 5.1 Factory 选择机制
+### 5.0 已适配部分 ✅🟢
+
+> ✅🟢 **AscendF16Linear 已在开发版本中适配**：`class AscendF16Linear(LinearBase)` 已实现并通过 `LinearFactory.register` 注册到 Ascend 设备，提供 BF16/FP16 基线推理能力。该部分已在开发版本中适配。
+>
+> ✅🟢 **MoE BF16 Fallback 已在开发版本中适配**：`class AscendBf16FallbackStrategy(MoeStrategy)` 已实现，并通过 `DeviceType.Ascend → AscendBf16FallbackStrategy` 注册到 fused_moe 工厂（fused_moe/__init__.py L62-70），提供 BF16 模式下的 MoE 推理降级方案。该部分已在开发版本中适配。
+
+### 5.1 Factory 选择机制 ✅🟢 部分 / ❌🔴 MXFP8 未适配
+
+> ✅🟢 **Factory 基础机制已在开发版本中适配**：Ascend 设备分支已注册，`impl/ascend/` 目录已创建并包含 F16Linear 和 BF16 MoE Fallback。
+> ❌🔴 **MXFP8 推理层尚未适配**：`NpuFp8MXFP8Linear` 和 `NpuMoEMXFP8Executor` 未实现。
 
 **文件**：`rtp_llm/models_py/modules/factory/linear/__init__.py` L19-27
 
 ```python
-# ➕ 新增 NPU 分支
+# ➕ ✅🟢 已适配 NPU 分支
 if device_type == DeviceType.Cuda:
     from .impl.cuda import *
-elif device_type == DeviceType.Npu:
-    from .impl.ascend import *  # ➕
+elif device_type == DeviceType.Ascend:
+    from .impl.ascend import *  # ✅🟢 已适配（含 F16Linear）
 ```
 
 **目录结构**：
@@ -456,13 +507,13 @@ models_py/modules/factory/linear/impl/
 │   ├── fp8_deepgemm_linear.py      # CUDA DeepGEMM (NPU 不使用)
 │   ├── fp8_gemm_linear.py          # CUDA 入口策略
 │   └── f16_linear.py               # 基线
-└── ascend/                          # ➕ 新建
-    ├── __init__.py
-    ├── fp8_mxfp8_linear.py          # NPU MXFP8 Linear
-    └── f16_linear.py                # NPU F16 基线
+└── ascend/                          # ✅🟢 已创建
+    ├── __init__.py                  # ✅🟢 已适配
+    ├── fp8_mxfp8_linear.py          # ❌🔴 待实现
+    └── f16_linear.py                # ✅🟢 已适配
 ```
 
-### 5.2 新增 NpuFp8MXFP8Linear
+### 5.2 新增 NpuFp8MXFP8Linear ❌🔴
 
 **文件**：`rtp_llm/models_py/modules/factory/linear/impl/ascend/fp8_mxfp8_linear.py` ➕ 新建
 
@@ -548,7 +599,7 @@ class NpuFp8MXFP8Linear(Linear):
         return output  # [M, N] BF16
 ```
 
-### 5.3 新增 NpuMoEMXFP8Executor
+### 5.3 新增 NpuMoEMXFP8Executor ❌🔴
 
 **文件**：`rtp_llm/models_py/modules/factory/fused_moe/impl/ascend/executors/npu_mxfp8_executor.py` ➕ 新建
 
@@ -652,36 +703,42 @@ class NpuMoEMXFP8Executor:
         return act_fp8, act_scale
 ```
 
-### 5.4 MoE Strategy 注册
+### 5.4 MoE Strategy 注册 ✅🟢 BF16 Fallback 已适配 / ❌🔴 MXFP8 未适配
+
+> ✅🟢 **BF16 Fallback Strategy 已在开发版本中适配**：`DeviceType.Ascend → AscendBf16FallbackStrategy` 已注册到 fused_moe 工厂（fused_moe/__init__.py L62-70），提供 BF16 模式下的 MoE 推理降级方案。该部分已在开发版本中适配。
+>
+> ❌🔴 **MXFP8 MoE Strategy 尚未适配**：以下 `NpuMoEMXFP8Executor` 和 `NpuMXFP8Strategy` 注册代码尚未实现。
 
 **文件**：`rtp_llm/models_py/modules/factory/fused_moe/impl/ascend/__init__.py` ➕ 新建
 
 ```python
-from .executors.npu_mxfp8_executor import NpuMoEMXFP8Executor
-from .strategy.npu_mxfp8 import NpuMXFP8Strategy
+# ✅🟢 BF16 Fallback 已适配 (AscendBf16FallbackStrategy)
+# ❌🔴 MXFP8 Strategy 待实现
+# from .executors.npu_mxfp8_executor import NpuMoEMXFP8Executor
+# from .strategy.npu_mxfp8 import NpuMXFP8Strategy
 
 # 注册策略
-FusedMoEFactory.register(NpuMXFP8Strategy)
+# FusedMoEFactory.register(NpuMXFP8Strategy)
 ```
 
 ---
 
-## 六、桥接层适配
+## 六、桥接层适配 ❌🔴
 
 ### 6.1 可移除的 CUDA Kernel
 
 | CUDA Kernel | 文件 | 处理方式 |
 |-------------|------|---------|
-| `scaled_fp8_quant.cu` | `bindings/cuda/kernels/` | 🗑️ 移除，NPU 用 `npu_dynamic_mx_quant` |
-| `librtp_compute_ops` | C++ 扩展 | 🗑️ 移除，NPU 原生算子替代 |
-| `mla_quant_kernel.cu` | `bindings/cuda/kernels/` | 🔄 ACLNN 重写 (独立工作项) |
+| `scaled_fp8_quant.cu` | `bindings/cuda/kernels/` | 🗑️❌🔴 移除，NPU 用 `npu_dynamic_mx_quant` |
+| `librtp_compute_ops` | C++ 扩展 | 🗑️❌🔴 移除，NPU 原生算子替代 |
+| `mla_quant_kernel.cu` | `bindings/cuda/kernels/` | 🔄❌🔴 ACLNN 重写 (独立工作项) |
 
 ### 6.2 可移除的第三方库
 
 | 库 | 用途 | 处理方式 |
 |----|------|---------|
-| DeepGEMM | FP8 BlockWise GEMM | 🗑️ 移除，`npu_quant_matmul` 替代 |
-| `torch._scaled_mm` | FP8 PerTensor GEMM | 🗑️ MXFP8 场景移除 |
+| DeepGEMM | FP8 BlockWise GEMM | 🗑️❌🔴 移除，`npu_quant_matmul` 替代 |
+| `torch._scaled_mm` | FP8 PerTensor GEMM | 🗑️❌🔴 MXFP8 场景移除 |
 
 ### 6.3 可保留的第三方库
 
@@ -690,31 +747,35 @@ FusedMoEFactory.register(NpuMXFP8Strategy)
 | FlashInfer | FP8 PerChannel / FP4 | 非 MXFP8 场景保留 |
 | CUTLASS | INT8 / FP8 GEMM | 非 MXFP8 场景保留 |
 
-### 6.4 fp8_kernel.py 函数处理
+### 6.4 fp8_kernel.py 函数处理 ❌🔴
 
 **文件**：`rtp_llm/models_py/kernels/cuda/fp8_kernel/fp8_kernel.py`
 
 | 函数 | 行号 | NPU 处理 |
 |------|------|---------|
-| `per_block_cast_to_fp8` | L329 | 🔄 NPU 不调用 (用 `npu_dynamic_mx_quant`) |
-| `requant_weight_ue8m0` | L374 | 🗑️ 移除 (NPU 原生 E8M0) |
-| `quant_weight_ue8m0` | L348 | 🗑️ 移除 |
-| `ceil_to_ue8m0` | L51 | 🗑️ 移除 (NPU 原生) |
-| `_transform_scale_ue8m0` | L56 | 🗑️ 移除 (NPU 原生) |
-| `sgl_per_token_group_quant_fp8` | L110 | 🔄 NPU 用 `npu_dynamic_mx_quant` |
+| `per_block_cast_to_fp8` | L329 | 🔄❌🔴 NPU 不调用 (用 `npu_dynamic_mx_quant`) |
+| `requant_weight_ue8m0` | L374 | 🗑️❌🔴 移除 (NPU 原生 E8M0) |
+| `quant_weight_ue8m0` | L348 | 🗑️❌🔴 移除 |
+| `ceil_to_ue8m0` | L51 | 🗑️❌🔴 移除 (NPU 原生) |
+| `_transform_scale_ue8m0` | L56 | 🗑️❌🔴 移除 (NPU 原生) |
+| `sgl_per_token_group_quant_fp8` | L110 | 🔄❌🔴 NPU 用 `npu_dynamic_mx_quant` |
 
 ---
 
 ## 七、通信层适配
 
-### 7.1 分布式通信后端
+### 7.0 HCCL 构建配置 ✅🟢
 
-| 文件 | 行号 | 修改 |
-|------|------|------|
-| `collective_torch.py` | L586 | `backend="nccl"` → `backend="hccl"` |
-| `backend_manager.py` | L50 | `backend="nccl"` → `backend="hccl"` |
+> ✅🟢 **HCCL 链接配置已在开发版本中适配**：`.bazelrc` 中已配置 `--linkopt="-lhccl"`，`def.bzl` 中已配置 `-DUSE_C10D_HCCL` 编译宏。该部分已在开发版本中适配。
 
-### 7.2 验证
+### 7.1 分布式通信后端（运行时）❌🔴
+
+| 文件 | 行号 | 修改 | 状态 |
+|------|------|------|------|
+| `collective_torch.py` | L586 | `backend="nccl"` → `backend="hccl"` | ❌🔴 |
+| `backend_manager.py` | L50 | `backend="nccl"` → `backend="hccl"` | ❌🔴 |
+
+### 7.2 验证 ❌🔴
 
 ```python
 import torch.distributed as dist
@@ -728,36 +789,36 @@ dist.init_process_group(backend="hccl")
 
 ### 8.1 单层验证
 
-#### Device 层
+#### Device 层 ✅🟢
 
 ```python
 from rtp_llm.device import get_current_device, DeviceType
 
-# 验证 NpuImpl 注册
+# ✅🟢 验证 AscendImpl 注册
 device = get_current_device()
-assert isinstance(device, NpuImpl)
+assert isinstance(device, AscendImpl)
 assert device.arch == 910
 
-# 验证 per_block_cast_to_fp8
+# ❌🔴 验证 per_block_cast_to_fp8 (未适配)
 weight = torch.randn(128, 128, dtype=torch.bfloat16, device="npu")
 weight_fp8, scale = device.per_block_cast_to_fp8(weight)
 assert weight_fp8.dtype == torch.float8_e4m3fn
 assert scale.dtype == torch.float8_e8m0fnu  # E8M0
 ```
 
-#### 配置层
+#### 配置层 ❌🔴
 
 ```python
-# 验证 load_from_ckpt 检测 ModelSlim
+# ❌🔴 验证 load_from_ckpt 检测 ModelSlim
 quant_config = QuantizationConfig.load_from_ckpt("/path/to/modelslim_model")
 assert isinstance(quant_config, ModelSlimConfig)
 assert quant_config.is_quanted() == True
 ```
 
-#### 权重层
+#### 权重层 ❌🔴
 
 ```python
-# 验证动态量化
+# ❌🔴 验证动态量化
 weight = torch.randn(4096, 4096, dtype=torch.bfloat16, device="npu")
 weight_fp8, scale = torch_npu.npu_dynamic_mx_quant(weight, torch.float8_e4m3fn)
 assert weight_fp8.dtype == torch.float8_e4m3fn
@@ -765,10 +826,10 @@ assert scale.dtype == torch.float8_e8m0fnu
 assert weight_fp8.shape == weight.shape
 ```
 
-#### 推理层
+#### 推理层 ❌🔴
 
 ```python
-# 验证 Linear
+# ❌🔴 验证 Linear
 x = torch.randn(128, 4096, dtype=torch.bfloat16, device="npu")
 weight_fp8 = torch.randn(4096, 4096, dtype=torch.float8_e4m3fn, device="npu")
 scale = torch.ones(32, 32, dtype=torch.float8_e8m0fnu, device="npu")
@@ -778,7 +839,7 @@ assert output.dtype == torch.bfloat16
 assert output.shape == (128, 4096)
 ```
 
-### 8.2 端到端验证
+### 8.2 端到端验证 ❌🔴
 
 ```python
 # 1. 动态量化启动
@@ -806,22 +867,29 @@ assert output.shape == (128, 4096)
 
 ### P0（必须，阻塞推理）
 
-1. **推理层 GEMM 替换**：`NpuFp8MXFP8Linear` + `npu_quant_matmul`
-2. **权重层算子替换**：`npu_dynamic_mx_quant` (动态量化路径)
-3. **Device 层**：`NpuImpl` 注册
+1. **推理层 GEMM 替换**：`NpuFp8MXFP8Linear` + `npu_quant_matmul` ❌🔴
+2. **权重层算子替换**：`npu_dynamic_mx_quant` (动态量化路径) ❌🔴
+3. **Device 层**：`AscendImpl` 注册 ✅🟢 已适配（MXFP8 方法 ❌🔴 待重写）
 
 ### P1（简化代码）
 
-4. **移除 `requant_weight_ue8m0`**：NPU 原生 E8M0
-5. **移除 DeepGEMM 依赖**：`has_deep_gemm()` 返回 False
-6. **移除 CUDA kernel**：`scaled_fp8_quant.cu`
+4. **移除 `requant_weight_ue8m0`**：NPU 原生 E8M0 ❌🔴
+5. **移除 DeepGEMM 依赖**：`has_deep_gemm()` 返回 False ❌🔴
+6. **移除 CUDA kernel**：`scaled_fp8_quant.cu` ❌🔴
 
 ### P2（扩展功能）
 
-7. **ModelSlim 预量化支持**：`ModelSlimConfig` + `ModelSlimWeight`
-8. **MoE MXFP8**：`NpuMoEMXFP8Executor` + `npu_grouped_matmul_swiglu_quant_v2`
-9. **通信层**：NCCL → HCCL
+7. **ModelSlim 预量化支持**：`ModelSlimConfig` + `ModelSlimWeight` ❌🔴
+8. **MoE MXFP8**：`NpuMoEMXFP8Executor` + `npu_grouped_matmul_swiglu_quant_v2` ❌🔴
+9. **通信层**：NCCL → HCCL ❌🔴
 
 ### P3（独立工作项）
 
-10. **MLA KV Cache 量化**：ACLNN 重写
+10. **MLA KV Cache 量化**：ACLNN 重写 ❌🔴
+
+### 已完成的基础设施 ✅🟢
+
+- **Device 层基础框架**：`DeviceType.Ascend`、`AscendImpl` 基础方法、注册机制 ✅🟢
+- **推理层 F16 基线**：`AscendF16Linear` + Factory 注册 ✅🟢
+- **MoE BF16 Fallback**：`AscendBf16FallbackStrategy` + fused_moe 注册 ✅🟢
+- **HCCL 构建配置**：`.bazelrc` 链接选项 + `def.bzl` 编译宏 ✅🟢

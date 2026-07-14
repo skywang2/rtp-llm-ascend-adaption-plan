@@ -1,17 +1,52 @@
 # RTP-LLM 迁移 NPU MXFP8 量化算子替换表 (v0.1)
 
 > 本文档梳理 RTP-LLM 迁移到华为昇腾 NPU 时，MXFP8（Microscaling FP8，OCP 标准）量化模块需要替换的 CUDA 算子。
+>
+> **标记说明**：✅🟢=已适配 | ❌🔴=未适配
+
+---
+
+## 适配状态
+
+> 基于 `rtp-llm-npu` 代码检查结果，标注当前算子替换的适配进度。
+
+### 已适配项 ✅🟢
+
+| 适配项 | 已适配代码 | 文件位置 |
+|--------|-----------|---------|
+| DeviceType.Ascend | `DeviceType.Ascend = 6` | device_type.py L14 |
+| AscendImpl 基础框架 | `class AscendImpl(GpuImpl)` 含 `get_device_id`、`_get_mem_info`、`support_dio_load` | device_impl.py L696-710 |
+| AscendImpl 注册 | `DeviceType.Ascend → AscendImpl` | device/__init__.py L22-23 |
+| AscendF16Linear | `class AscendF16Linear(LinearBase)` + `LinearFactory.register` | impl/ascend/f16_linear.py |
+| MoE BF16 Fallback | `class AscendBf16FallbackStrategy(MoeStrategy)` | impl/ascend/strategy/pytorch_fallback.py |
+| MoE Ascend 注册 | `DeviceType.Ascend → AscendBf16FallbackStrategy` | fused_moe/__init__.py L62-70 |
+| HCCL 链接配置 | `.bazelrc` 中 `--linkopt="-lhccl"`，`def.bzl` 中 `-DUSE_C10D_HCCL` | 构建配置 |
+
+### 未适配项 ❌🔴
+
+| 适配项 | 说明 |
+|--------|------|
+| AscendImpl MXFP8 方法 | 未重写 `per_block_cast_to_fp8`、`requant_weight_ue8m0` |
+| ModelSlimConfig | quant_config.py 中无相关代码 |
+| load_from_ckpt ModelSlim 检测 | 无 `quant_model_description.json` 检测 |
+| requant_weight_ue8m0 移除 | per_block_fp8_quant_weight.py L780 仍调用 |
+| per_block_cast_to_fp8 替换 | per_block_fp8_quant_weight.py L847 仍调用原函数 |
+| NpuFp8MXFP8Linear | 无 ascend MXFP8 Linear 实现 |
+| NpuMoEMXFP8Executor | 无 ascend MXFP8 MoE 实现 |
+| DeepGEMM wrapper 修改 | `has_deep_gemm`/`is_deep_gemm_e8m0_used` 未改 |
+| NCCL→HCCL (运行时) | collective_torch.py 仍用 nccl，backend_manager.py 仍 `backend="nccl"` |
+| NZ 格式转换 | 无 `npu_format_cast` 调用 |
 
 ---
 
 ## 一、核心算子替换总览
 
-| 序号 | 功能 | CUDA 算子 | NPU 替换算子 | 替换方式 |
-|------|------|----------|-------------|---------|
-| 1 | 动态量化（BF16→MXFP8） | `per_block_cast_to_fp8` | `torch_npu.npu_dynamic_mx_quant` | 直接替换 |
-| 2 | DenseMLP 的 MXFP8 GEMM | `deep_gemm.fp8_gemm_nt` | `torch_npu.npu_quant_matmul` | 直接替换 |
-| 3 | MoE 的 MXFP8 Grouped GEMM | `m_grouped_fp8_gemm_nt_masked` | `torch_npu.npu_grouped_matmul_swiglu_quant_v2` | 直接替换 |
-| 4 | E8M0 scale 格式转换 | `requant_weight_ue8m0` | **移除** | NPU 原生支持 E8M0 |
+| 序号 | 功能 | CUDA 算子 | NPU 替换算子 | 替换方式 | 适配状态 |
+|------|------|----------|-------------|---------|---------|
+| 1 | 动态量化（BF16→MXFP8） | `per_block_cast_to_fp8` | `torch_npu.npu_dynamic_mx_quant` | 直接替换 | ❌🔴 |
+| 2 | DenseMLP 的 MXFP8 GEMM | `deep_gemm.fp8_gemm_nt` | `torch_npu.npu_quant_matmul` | 直接替换 | ❌🔴 |
+| 3 | MoE 的 MXFP8 Grouped GEMM | `m_grouped_fp8_gemm_nt_masked` | `torch_npu.npu_grouped_matmul_swiglu_quant_v2` | 直接替换 | ❌🔴 |
+| 4 | E8M0 scale 格式转换 | `requant_weight_ue8m0` | **移除** | NPU 原生支持 E8M0 | ❌🔴 |
 
 ---
 
@@ -133,14 +168,16 @@ NPU 不需要的原因：
 
 ## 三、替换涉及的代码文件
 
-| 层级 | 文件 | 修改内容 |
-|------|------|---------|
-| **Device 层** | `device/device_impl.py` | 新增 `NpuImpl` 类，重写 `per_block_cast_to_fp8` 方法 |
-| **权重层** | `model_loader/per_block_fp8_quant_weight.py` | 移除 `_postprocess` 中的 `requant_weight_ue8m0` 调用 |
-| **权重层** | `model_loader/per_block_fp8_quant_weight.py` | 替换 `_load_raw_tensor` 中的 `per_block_cast_to_fp8` 为 `npu_dynamic_mx_quant` |
-| **推理层** | `models_py/modules/factory/linear/` | 新增 `impl/npu/fp8_mxfp8_linear.py` |
-| **推理层** | `models_py/modules/factory/fused_moe/` | 新增 `impl/npu/executors/mxfp8_executor.py` |
-| **桥接层** | `models_py/kernels/cuda/deepgemm_wrapper.py` | 修改 `has_deep_gemm()` 返回 False |
+| 层级 | 文件 | 修改内容 | 适配状态 |
+|------|------|---------|---------|
+| **Device 层** | `device/device_impl.py` | 新增 `AscendImpl` 类，重写 `per_block_cast_to_fp8` 方法 | ✅🟢（基础框架）/ ❌🔴（MXFP8 方法） |
+| **Device 层** | `device/device_type.py` | 新增 `DeviceType.Ascend` 枚举 | ✅🟢 |
+| **Device 层** | `device/__init__.py` | 注册 `AscendImpl` | ✅🟢 |
+| **权重层** | `model_loader/per_block_fp8_quant_weight.py` | 移除 `_postprocess` 中的 `requant_weight_ue8m0` 调用 | ❌🔴 |
+| **权重层** | `model_loader/per_block_fp8_quant_weight.py` | 替换 `_load_raw_tensor` 中的 `per_block_cast_to_fp8` 为 `npu_dynamic_mx_quant` | ❌🔴 |
+| **推理层** | `models_py/modules/factory/linear/impl/ascend/` | F16 Linear 已适配；MXFP8 Linear 未适配 | ✅🟢（F16）/ ❌🔴（MXFP8） |
+| **推理层** | `models_py/modules/factory/fused_moe/impl/ascend/` | BF16 Fallback 已适配；MXFP8 MoE 未适配 | ✅🟢（BF16）/ ❌🔴（MXFP8） |
+| **桥接层** | `models_py/kernels/cuda/deepgemm_wrapper.py` | 修改 `has_deep_gemm()` 返回 False | ❌🔴 |
 
 ---
 
@@ -228,11 +265,15 @@ w2_scale = torch.ones(E, K // 128, N // 256, dtype=torch.float8_e8m0fnu, device=
 
 迁移到 NPU 时，量化模块的算子替换本质上是将 **CUDA DeepGEMM 库**替换为 **torch_npu 原生算子**：
 
-| 变化 | 说明 |
-|------|------|
-| 算子来源 | DeepGEMM → torch_npu |
-| Scale 格式 | FP32 + 转换 → E8M0 原生 |
-| MoE 融合 | 3 步分开执行 → 1 步融合算子 |
-| 代码简化 | 移除 `requant_weight_ue8m0` 转换逻辑 |
+| 变化 | 说明 | 适配状态 |
+|------|------|---------|
+| 算子来源 | DeepGEMM → torch_npu | ❌🔴 |
+| Scale 格式 | FP32 + 转换 → E8M0 原生 | ❌🔴 |
+| MoE 融合 | 3 步分开执行 → 1 步融合算子 | ❌🔴 |
+| 代码简化 | 移除 `requant_weight_ue8m0` 转换逻辑 | ❌🔴 |
+
+> ✅🟢 **已适配基础部分**：DeviceType.Ascend 枚举、AscendImpl 基础框架（`get_device_id`、`_get_mem_info`、`support_dio_load`）、AscendImpl 注册、AscendF16Linear、MoE BF16 Fallback、HCCL 链接配置已在开发版本中适配。
+>
+> ❌🔴 **未适配核心部分**：MXFP8 量化的 3 个核心算子替换（`per_block_cast_to_fp8` → `npu_dynamic_mx_quant`、DeepGEMM → `npu_quant_matmul`、DeepGEMM masked → `npu_grouped_matmul_swiglu_quant_v2`）和 1 处移除（`requant_weight_ue8m0`）均未完成。
 
 核心替换只有 **3 个算子** + **1 处移除**，迁移成本较低。

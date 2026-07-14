@@ -4,6 +4,40 @@
 
 ---
 
+## 适配状态
+
+> 基于 `rtp-llm-npu` 代码检查结果，当前各适配项的状态如下：
+
+### 已适配项 ✅🟢
+
+| 适配项 | 已适配代码 | 文件位置 |
+|--------|-----------|---------|
+| DeviceType.Ascend | `DeviceType.Ascend = 6` | device_type.py L14 |
+| AscendImpl 基础框架 | `class AscendImpl(GpuImpl)` 含 `get_device_id`、`_get_mem_info`、`support_dio_load` | device_impl.py L696-710 |
+| AscendImpl 注册 | `DeviceType.Ascend → AscendImpl` | device/__init__.py L22-23 |
+| is_ascend() 函数 | `get_device_type() == DeviceType.Ascend` | device_type.py L44-45 |
+| AscendF16Linear | `class AscendF16Linear(LinearBase)` + `LinearFactory.register` | impl/ascend/f16_linear.py, __init__.py |
+| MoE BF16 Fallback | `class AscendBf16FallbackStrategy(MoeStrategy)` | impl/ascend/strategy/pytorch_fallback.py |
+| MoE Ascend 注册 | `DeviceType.Ascend → AscendBf16FallbackStrategy` | fused_moe/__init__.py L62-70 |
+| HCCL 链接配置 | `.bazelrc` 中 `--linkopt="-lhccl"`，`def.bzl` 中 `-DUSE_C10D_HCCL` | 构建配置 |
+
+### 未适配项 ❌🔴
+
+| 适配项 | 说明 |
+|--------|------|
+| AscendImpl MXFP8 方法 | 未重写 per_block_cast_to_fp8、requant_weight_ue8m0 |
+| ModelSlimConfig | quant_config.py 中无相关代码 |
+| load_from_ckpt ModelSlim 检测 | 无 quant_model_description.json 检测 |
+| requant_weight_ue8m0 移除 | per_block_fp8_quant_weight.py L780 仍调用 |
+| per_block_cast_to_fp8 替换 | per_block_fp8_quant_weight.py L847 仍调用原函数 |
+| NpuFp8MXFP8Linear | 无 ascend MXFP8 Linear 实现 |
+| NpuMoEMXFP8Executor | 无 ascend MXFP8 MoE 实现 |
+| DeepGEMM wrapper 修改 | has_deep_gemm/is_deep_gemm_e8m0_used 未改 |
+| NCCL→HCCL (运行时) | collective_torch.py 仍用 nccl，backend_manager.py 仍 backend="nccl" |
+| NZ 格式转换 | 无 npu_format_cast 调用 |
+
+---
+
 ## 一、目标与范围
 
 ### 1.1 量化目标
@@ -34,16 +68,18 @@
 
 MXFP8 移植涉及 **4 个层面**：
 
-| 层面 | 当前实现 | NPU 目标 | 工作量 |
-|------|---------|---------|--------|
-| 配置层 | `Fp8BlockWiseQuantConfig` | 保留，调整 dtype | 低 |
-| 权重层 | `per_block_cast_to_fp8` + `requant_weight_ue8m0` | `npu_dynamic_mx_quant`，移除手动 E8M0 | 中 |
-| 推理层 | DeepGEMM `fp8_gemm_nt` | `torch_npu.npu_quant_matmul`（MXFP8） | 中 |
-| 桥接层 | `scaled_fp8_quant.cu` | 移除或用 `torch_npu` 替代 | 低 |
+| 层面 | 当前实现 | NPU 目标 | 工作量 | 状态 |
+|------|---------|---------|--------|------|
+| 配置层 | `Fp8BlockWiseQuantConfig` | 保留，调整 dtype | 低 | ❌🔴 ModelSlimConfig 未适配 |
+| 权重层 | `per_block_cast_to_fp8` + `requant_weight_ue8m0` | `npu_dynamic_mx_quant`，移除手动 E8M0 | 中 | ❌🔴 算子替换未完成 |
+| 推理层 | DeepGEMM `fp8_gemm_nt` | `torch_npu.npu_quant_matmul`（MXFP8） | 中 | ✅🟢 F16基线已适配 ❌🔴 MXFP8未适配 |
+| 桥接层 | `scaled_fp8_quant.cu` | 移除或用 `torch_npu` 替代 | 低 | ❌🔴 未适配 |
+
+> ✅🟢 **Device 基础框架已在开发版本中适配**：`DeviceType.Ascend`、`AscendImpl` 基础类（含 `get_device_id`、`_get_mem_info`、`support_dio_load`）、注册机制、`is_ascend()` 函数均已实现。AscendImpl 尚未重写 MXFP8 相关方法（`per_block_cast_to_fp8`、`requant_weight_ue8m0`），该部分仍在 ❌🔴 未适配状态。
 
 ---
 
-## 三、配置层适配
+## 三、配置层适配 ❌🔴
 
 ### 3.1 保留的配置类
 
@@ -69,7 +105,7 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
 
 ---
 
-## 四、权重层适配
+## 四、权重层适配 ❌🔴
 
 ### 4.1 `_postprocess` 算子替换
 
@@ -107,14 +143,20 @@ output = torch_npu.npu_quant_matmul(input, weight_fp8, weight_scale)
 
 ## 五、推理层适配
 
-### 5.1 量化 GEMM 替换
+### 5.0 已适配部分 ✅🟢
 
-| 推理模块 | CUDA 实现 | NPU 替代 |
-|---------|----------|---------|
-| FP8 BlockWise Linear | DeepGEMM `fp8_gemm_nt` | `torch_npu.npu_quant_matmul`（MXFP8） |
-| FP8 BlockWise MoE | DeepGEMM masked executor | `torch_npu.npu_grouped_matmul`（MXFP8） |
+> ✅🟢 **AscendF16Linear 已在开发版本中适配**：`class AscendF16Linear(LinearBase)` 已实现并通过 `LinearFactory.register` 注册到 Ascend 设备，提供 BF16/FP16 基线推理能力。该部分已在开发版本中适配。
+>
+> ✅🟢 **MoE BF16 Fallback 已在开发版本中适配**：`class AscendBf16FallbackStrategy(MoeStrategy)` 已实现，并通过 `DeviceType.Ascend → AscendBf16FallbackStrategy` 注册到 fused_moe 工厂（fused_moe/__init__.py L62-70），提供 BF16 模式下的 MoE 推理降级方案。该部分已在开发版本中适配。
 
-### 5.2 代码改动示例
+### 5.1 量化 GEMM 替换 ❌🔴
+
+| 推理模块 | CUDA 实现 | NPU 替代 | 状态 |
+|---------|----------|---------|------|
+| FP8 BlockWise Linear | DeepGEMM `fp8_gemm_nt` | `torch_npu.npu_quant_matmul`（MXFP8） | ❌🔴 |
+| FP8 BlockWise MoE | DeepGEMM masked executor | `torch_npu.npu_grouped_matmul`（MXFP8） | ❌🔴 |
+
+### 5.2 代码改动示例 ❌🔴
 
 **RTP-LLM 当前实现**（CUDA）：
 ```python
@@ -150,16 +192,17 @@ models_py/modules/factory/
 ├── linear/impl/
 │   ├── cuda/
 │   │   └── fp8_deepgemm_linear.py      # 现有 CUDA 实现
-│   └── ascend/                          # 新增 NPU 实现
-│       └── fp8_mxfp8_linear.py
+│   └── ascend/                          # ✅🟢 已创建（含 F16Linear）
+│       ├── f16_linear.py                # ✅🟢 已适配
+│       └── fp8_mxfp8_linear.py         # ❌🔴 待实现
 ├── fused_moe/impl/
 │   ├── cuda/
-│   └── ascend/
+│   └── ascend/                          # ✅🟢 已创建（含 BF16 Fallback）
 ```
 
 ---
 
-## 六、桥接层适配
+## 六、桥接层适配 ❌🔴
 
 ### 6.1 需处理的 CUDA Kernel
 
@@ -177,7 +220,7 @@ models_py/modules/factory/
 
 ---
 
-## 七、ModelSlim 预量化支持（可选）
+## 七、ModelSlim 预量化支持（可选）❌🔴
 
 除了 Load Quant（框架内运行时量化），还可支持 ModelSlim 预生成的 MXFP8 模型：
 
@@ -207,21 +250,28 @@ class ModelSlimWeight(QuantWeight):
 
 ## 八、适配优先级
 
-### P0（必须，阻塞推理）
+### P0（必须，阻塞推理）❌🔴
 
-1. **推理层 GEMM 替换**：DeepGEMM → `torch_npu.npu_quant_matmul`（MXFP8）
-2. **权重层算子替换**：`per_block_cast_to_fp8` → `npu_dynamic_mx_quant`
+1. **推理层 GEMM 替换**：DeepGEMM → `torch_npu.npu_quant_matmul`（MXFP8）❌🔴
+2. **权重层算子替换**：`per_block_cast_to_fp8` → `npu_dynamic_mx_quant` ❌🔴
 
-### P1（简化代码）
+### P1（简化代码）❌🔴
 
-3. **移除手动 E8M0 转换**：删除 `requant_weight_ue8m0` 调用
-4. **移除 DeepGEMM 依赖**：删除 `fp8_deepgemm_linear.py` 中的 CUDA 调用
-5. **移除桥接层 CUDA kernel**：`scaled_fp8_quant.cu`
+3. **移除手动 E8M0 转换**：删除 `requant_weight_ue8m0` 调用 ❌🔴
+4. **移除 DeepGEMM 依赖**：删除 `fp8_deepgemm_linear.py` 中的 CUDA 调用 ❌🔴
+5. **移除桥接层 CUDA kernel**：`scaled_fp8_quant.cu` ❌🔴
 
-### P2（扩展功能）
+### P2（扩展功能）❌🔴
 
-6. **ModelSlim 预量化支持**：新增 `ModelSlimConfig` + `ModelSlimWeight`
-7. **配置层 dtype 调整**：`get_supported_compute_dtypes`
+6. **ModelSlim 预量化支持**：新增 `ModelSlimConfig` + `ModelSlimWeight` ❌🔴
+7. **配置层 dtype 调整**：`get_supported_compute_dtypes` ❌🔴
+
+### 已完成的基础设施 ✅🟢
+
+- **Device 层基础框架**：`DeviceType.Ascend`、`AscendImpl`、注册机制 ✅🟢
+- **推理层 F16 基线**：`AscendF16Linear` ✅🟢
+- **MoE BF16 Fallback**：`AscendBf16FallbackStrategy` + 注册 ✅🟢
+- **HCCL 构建配置**：链接选项和编译宏 ✅🟢
 
 ---
 
@@ -229,11 +279,13 @@ class ModelSlimWeight(QuantWeight):
 
 MXFP8 移植的核心工作是 **3 个替换 + 1 个移除**：
 
-| 序号 | 工作项 | 具体内容 |
-|------|--------|---------|
-| 1 | **替换推理 GEMM** | DeepGEMM `fp8_gemm_nt` → `torch_npu.npu_quant_matmul` |
-| 2 | **替换权重量化** | `per_block_cast_to_fp8` → `npu_dynamic_mx_quant` |
-| 3 | **移除手动 E8M0** | 删除 `requant_weight_ue8m0`（NPU 原生支持） |
-| 4 | **移除第三方依赖** | DeepGEMM / `scaled_fp8_quant.cu` |
+| 序号 | 工作项 | 具体内容 | 状态 |
+|------|--------|---------|------|
+| 1 | **替换推理 GEMM** | DeepGEMM `fp8_gemm_nt` → `torch_npu.npu_quant_matmul` | ❌🔴 |
+| 2 | **替换权重量化** | `per_block_cast_to_fp8` → `npu_dynamic_mx_quant` | ❌🔴 |
+| 3 | **移除手动 E8M0** | 删除 `requant_weight_ue8m0`（NPU 原生支持） | ❌🔴 |
+| 4 | **移除第三方依赖** | DeepGEMM / `scaled_fp8_quant.cu` | ❌🔴 |
 
 **优势**：MXFP8 与 RTP-LLM 的 FP8 BlockWise 算法等价，精度一致，适配工作量最小，是最优先落地的 NPU 量化方案。
+
+**当前进展**：Device 基础框架、F16 推理基线、MoE BF16 Fallback、HCCL 构建配置已完成 ✅🟢，MXFP8 核心替换（推理 GEMM、权重量化算子、E8M0 移除、DeepGEMM 移除）尚未适配 ❌🔴。
