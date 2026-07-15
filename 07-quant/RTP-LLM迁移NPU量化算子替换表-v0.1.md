@@ -39,6 +39,38 @@
 
 ---
 
+## 方案说明
+
+> **MXFP8 是 W8A8 量化大类下 W8 子类的一种具体实现**
+
+### 量化方案分类
+
+```
+W8A8（量化大类：Weight 8-bit + Activation 8-bit）
+├── W8A8 完整方案（权重+激活都量化）
+│   ├── W8A8_INT8（SmoothQuant）
+│   └── W8A8_MXFP8（权重 FP8 + 激活 FP8）
+├── W8 子类（权重-only：仅权重量化）
+│   ├── W8_MXFP8 ← 当前 RTP-LLM 实现（Weight-only FP8 BlockWise）
+│   ├── W8_INT8
+│   └── ...
+└── A8 子类（激活-only：仅激活量化）
+```
+
+### W8 和 A8 的定义
+
+- **W8（Weight-only 8-bit）**：W8A8 量化方案的一个子类，仅对权重量化为 8-bit，激活保持高精度（如 BF16/FP16）
+- **A8（Activation-only 8-bit）**：W8A8 量化方案的一个子类，仅对激活量化为 8-bit，权重保持高精度
+
+### W8_MXFP8 实现细节
+
+- **量化类型**：Weight-only 8-bit（W8 子类）
+- **数据格式**：FP8 E4M3（权重）+ BF16（激活）
+- **量化方式**：BlockWise（128×128 block）+ E8M0 scale
+- **代码标记**：`# W8_MXFP8: Weight-only FP8 Quantization（W8A8 大类下）`
+
+---
+
 ## 一、核心算子替换总览
 
 | 序号 | 功能 | CUDA 算子 | NPU 替换算子 | 替换方式 | 适配状态 |
