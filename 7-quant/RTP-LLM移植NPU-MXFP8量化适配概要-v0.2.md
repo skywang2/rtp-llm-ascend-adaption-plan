@@ -1,6 +1,6 @@
-# RTP-LLM 移植 NPU MXFP8 量化适配概要 (v0.1)
+# RTP-LLM 移植 NPU W8_MXFP8 量化适配概要 (v0.1)
 
-> 本文档聚焦于将 RTP-LLM 的 **FP8 BlockWise 量化**移植到 NPU 的 **MXFP8** 方案，是 [RTP-LLM移植NPU量化适配概要](./RTP-LLM移植NPU量化适配概要-v0.1.md) 的精简版。
+> 本文档聚焦于将 RTP-LLM 的 **FP8 Per-Block 量化**移植到 NPU 的 **W8_MXFP8** 方案，是 [RTP-LLM移植NPU量化适配概要](./RTP-LLM移植NPU量化适配概要-v0.1.md) 的精简版。
 
 ---
 
@@ -50,7 +50,7 @@ W8A8（量化大类：Weight 8-bit + Activation 8-bit）
 │   ├── W8A8_INT8（SmoothQuant）
 │   └── W8A8_MXFP8（权重 FP8 + 激活 FP8）
 ├── W8 子类（权重-only：仅权重量化）
-│   ├── W8_MXFP8 ← 当前 RTP-LLM 实现（Weight-only FP8 BlockWise）
+│   ├── W8_MXFP8 ← 当前 RTP-LLM 实现（Weight-only FP8，group_size=32）
 │   ├── W8_INT8
 │   └── ...
 └── A8 子类（激活-only：仅激活量化）
@@ -65,7 +65,8 @@ W8A8（量化大类：Weight 8-bit + Activation 8-bit）
 
 - **量化类型**：Weight-only 8-bit（W8 子类）
 - **数据格式**：FP8 E4M3（权重）+ BF16（激活）
-- **量化方式**：BlockWise（128×128 block）+ E8M0 scale
+- **量化方式**：W8_MXFP8（group_size=32）+ E8M0 scale
+- **命名来源**：与 vllm-ascend 的 `@register_scheme("W8A8_MXFP8", ...)` 命名一致
 - **代码标记**：`# W8_MXFP8: Weight-only FP8 Quantization（W8A8 大类下）`
 
 ---
@@ -76,17 +77,17 @@ W8A8（量化大类：Weight 8-bit + Activation 8-bit）
 
 | 维度 | RTP-LLM 原方案 | NPU 目标方案 |
 |------|--------------|-------------|
-| 量化方法 | FP8 BlockWise (128x128) | MXFP8 (128x128) |
+| 量化方法 | FP8 Per-Block (group_size=128) | W8_MXFP8 (group_size=32) |
 | 权重格式 | FP8 E4M3 + 手动 E8M0 scale | FP8 E4M3 + 原生 E8M0 scale |
-| 推理算子 | DeepGEMM `fp8_gemm_nt` | `torch_npu.npu_quant_matmul`（MXFP8） |
+| 推理算子 | DeepGEMM `fp8_gemm_nt` | `torch_npu.npu_quant_matmul`（W8_MXFP8） |
 | 量化工具 | Load Quant（框架内） | Load Quant + ModelSlim（预量化） |
 
-### 1.2 为什么选择 MXFP8
+### 1.2 为什么选择 W8_MXFP8
 
-1. **RTP-LLM 已有 FP8 BlockWise 实现**，MXFP8 是其 NPU 原生等价方案
-2. **算法等价**：两者都是 128x128 block-wise FP8 量化，精度一致
+1. **RTP-LLM 已有 FP8 Per-Block 实现**，W8_MXFP8 是其 NPU 原生等价方案
+2. **对齐 vllm-ascend 标准**：group_size=32 与 vllm-ascend 实现一致
 3. **NPU 原生支持**：`torch_npu.npu_dynamic_mx_quant` 原生支持 E8M0 scale
-4. **适配工作量最小**：相比 INT4/INT8 方案，MXFP8 改动最少
+4. **适配工作量最小**：相比 INT4/INT8 方案，W8_MXFP8 改动最少
 
 ### 1.3 不在范围内
 
@@ -98,16 +99,16 @@ W8A8（量化大类：Weight 8-bit + Activation 8-bit）
 
 ## 二、适配工作总览
 
-MXFP8 移植涉及 **4 个层面**：
+W8_MXFP8 移植涉及 **4 个层面**：
 
 | 层面 | 当前实现 | NPU 目标 | 工作量 | 状态 |
 |------|---------|---------|--------|------|
 | 配置层 | `Fp8BlockWiseQuantConfig` | 保留，调整 dtype | 低 | ❌🔴 ModelSlimConfig 未适配 |
 | 权重层 | `per_block_cast_to_fp8` + `requant_weight_ue8m0` | `npu_dynamic_mx_quant`，移除手动 E8M0 | 中 | ❌🔴 算子替换未完成 |
-| 推理层 | DeepGEMM `fp8_gemm_nt` | `torch_npu.npu_quant_matmul`（MXFP8） | 中 | ✅🟢 F16基线已适配 ❌🔴 MXFP8未适配 |
+| 推理层 | DeepGEMM `fp8_gemm_nt` | `torch_npu.npu_quant_matmul`（W8_MXFP8） | 中 | ✅🟢 F16基线已适配 ❌🔴 W8_MXFP8未适配 |
 | 桥接层 | `scaled_fp8_quant.cu` | 移除或用 `torch_npu` 替代 | 低 | ❌🔴 未适配 |
 
-> ✅🟢 **Device 基础框架已在开发版本中适配**：`DeviceType.Ascend`、`AscendImpl` 基础类（含 `get_device_id`、`_get_mem_info`、`support_dio_load`）、注册机制、`is_ascend()` 函数均已实现。AscendImpl 尚未重写 MXFP8 相关方法（`per_block_cast_to_fp8`、`requant_weight_ue8m0`），该部分仍在 ❌🔴 未适配状态。
+> ✅🟢 **Device 基础框架已在开发版本中适配**：`DeviceType.Ascend`、`AscendImpl` 基础类（含 `get_device_id`、`_get_mem_info`、`support_dio_load`）、注册机制、`is_ascend()` 函数均已实现。AscendImpl 尚未重写 W8_MXFP8 相关方法（`per_block_cast_to_fp8`、`requant_weight_ue8m0`），该部分仍在 ❌🔴 未适配状态。
 
 ---
 
@@ -143,7 +144,7 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
 
 | CUDA 算子 | 功能 | NPU 替代方案 |
 |-----------|------|-------------|
-| `per_block_cast_to_fp8` | FP8 BlockWise 在线量化 | `torch_npu.npu_dynamic_mx_quant`（FP8 + E8M0） |
+| `per_block_cast_to_fp8` | FP8 Per-Block 在线量化 | `torch_npu.npu_dynamic_mx_quant`（FP8 + E8M0） |
 | `requant_weight_ue8m0` | E8M0 scale 重量化 | **移除**（NPU 原生支持 E8M0） |
 | `convert_fp8_weight_params` | FP8 权重格式转换 | **移除或简化** |
 
@@ -160,10 +161,15 @@ output = deepgemm_fp8_gemm(input, weight_fp8, weight_scale)
 **NPU 适配后**：
 ```python
 # NPU 原生支持 E8M0，无需手动转换
-weight_fp8, weight_scale = torch_npu.npu_dynamic_mx_quant(weight, dtype=torch.float8_e4m3fn)
-# weight_scale 直接是 E8M0 格式，无需 requant
+weight_fp8, weight_scale = torch_npu.npu_dynamic_mx_quant(weight, dst_type=torch.float8_e4m3fn)
+# weight_scale 直接是 E8M0 格式（uint8 存储，逻辑类型 float8_e8m0fnu）
 output = torch_npu.npu_quant_matmul(input, weight_fp8, weight_scale)
 ```
+
+**关键说明**：
+- **group_size=32**：与 vllm-ascend 标准一致（默认值）
+- **scale 存储格式**：uint8 物理存储，逻辑类型 float8_e8m0fnu (E8M0)
+- **NPU API 参数**：通过 `scale_dtype=FLOAT8_E8M0FNU_DTYPE` 指定逻辑类型
 
 ### 4.3 可保留的部分
 
@@ -185,8 +191,8 @@ output = torch_npu.npu_quant_matmul(input, weight_fp8, weight_scale)
 
 | 推理模块 | CUDA 实现 | NPU 替代 | 状态 |
 |---------|----------|---------|------|
-| FP8 BlockWise Linear | DeepGEMM `fp8_gemm_nt` | `torch_npu.npu_quant_matmul`（MXFP8） | ❌🔴 |
-| FP8 BlockWise MoE | DeepGEMM masked executor | `torch_npu.npu_grouped_matmul`（MXFP8） | ❌🔴 |
+| W8_MXFP8 Linear | DeepGEMM `fp8_gemm_nt` | `torch_npu.npu_quant_matmul`（W8_MXFP8） | ❌🔴 |
+| W8_MXFP8 MoE | DeepGEMM masked executor | `torch_npu.npu_grouped_matmul`（W8_MXFP8） | ❌🔴 |
 
 ### 5.2 代码改动示例 ❌🔴
 
@@ -195,7 +201,7 @@ output = torch_npu.npu_quant_matmul(input, weight_fp8, weight_scale)
 # fp8_deepgemm_linear.py
 class Fp8DeepGemmLinear(Linear):
     def forward(self, x):
-        # DeepGEMM FP8 BlockWise GEMM
+        # DeepGEMM FP8 Per-Block GEMM
         output = deepgemm.fp8_gemm_nt(
             x_fp8, self.weight_fp8,
             x_scale, self.weight_scale  # E8M0 scale
@@ -206,13 +212,15 @@ class Fp8DeepGemmLinear(Linear):
 **NPU 适配后**：
 ```python
 # ascend/fp8_mxfp8_linear.py
-class Fp8MxFp8Linear(Linear):
+class NpuFp8MXFP8Linear(Linear):
     def forward(self, x):
-        # NPU MXFP8 GEMM
+        # NPU W8_MXFP8 GEMM
         output = torch_npu.npu_quant_matmul(
             x_fp8, self.weight_fp8,
-            x_scale, self.weight_scale,  # 原生 E8M0 scale
-            dtype=torch.float8_e4m3fn
+            self.weight_scale,  # 原生 E8M0 scale
+            scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            output_dtype=torch.bfloat16,
+            group_sizes=[1, 1, 32]  # group_size=32
         )
         return output
 ```
@@ -309,7 +317,7 @@ class ModelSlimWeight(QuantWeight):
 
 ## 九、总结
 
-MXFP8 移植的核心工作是 **3 个替换 + 1 个移除**：
+W8_MXFP8 移植的核心工作是 **3 个替换 + 1 个移除**：
 
 | 序号 | 工作项 | 具体内容 | 状态 |
 |------|--------|---------|------|
@@ -318,6 +326,11 @@ MXFP8 移植的核心工作是 **3 个替换 + 1 个移除**：
 | 3 | **移除手动 E8M0** | 删除 `requant_weight_ue8m0`（NPU 原生支持） | ❌🔴 |
 | 4 | **移除第三方依赖** | DeepGEMM / `scaled_fp8_quant.cu` | ❌🔴 |
 
-**优势**：MXFP8 与 RTP-LLM 的 FP8 BlockWise 算法等价，精度一致，适配工作量最小，是最优先落地的 NPU 量化方案。
+**关键参数**：
+- **方案名称**：W8_MXFP8（与 vllm-ascend 命名一致）
+- **group_size**：32（vllm-ascend 标准）
+- **scale 存储**：uint8（逻辑类型 float8_e8m0fnu/E8M0）
 
-**当前进展**：Device 基础框架、F16 推理基线、MoE BF16 Fallback、HCCL 构建配置已完成 ✅🟢，MXFP8 核心替换（推理 GEMM、权重量化算子、E8M0 移除、DeepGEMM 移除）尚未适配 ❌🔴。
+**优势**：W8_MXFP8 与 vllm-ascend 实现完全一致，对齐行业标准，适配工作量最小，是最优先落地的 NPU 量化方案。
+
+**当前进展**：Device 基础框架、F16 推理基线、MoE BF16 Fallback、HCCL 构建配置已完成 ✅🟢，W8_MXFP8 核心替换（推理 GEMM、权重量化算子、E8M0 移除、DeepGEMM 移除）尚未适配 ❌🔴。

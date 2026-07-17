@@ -51,7 +51,7 @@ W8A8（量化大类：Weight 8-bit + Activation 8-bit）
 │   ├── W8A8_INT8（SmoothQuant）
 │   └── W8A8_MXFP8（权重 FP8 + 激活 FP8）
 ├── W8 子类（权重-only：仅权重量化）
-│   ├── W8_MXFP8 ← 当前 RTP-LLM 实现（Weight-only FP8 BlockWise）
+│   ├── W8_MXFP8 ← 当前 RTP-LLM 实现（Weight-only FP8，group_size=32）
 │   ├── W8_INT8
 │   └── ...
 └── A8 子类（激活-only：仅激活量化）
@@ -66,7 +66,8 @@ W8A8（量化大类：Weight 8-bit + Activation 8-bit）
 
 - **量化类型**：Weight-only 8-bit（W8 子类）
 - **数据格式**：FP8 E4M3（权重）+ BF16（激活）
-- **量化方式**：BlockWise（128×128 block）+ E8M0 scale
+- **量化方式**：W8_MXFP8（group_size=32）+ E8M0 scale
+- **命名来源**：与 vllm-ascend 的 `@register_scheme("W8A8_MXFP8", ...)` 命名一致
 - **代码标记**：`# W8_MXFP8: Weight-only FP8 Quantization（W8A8 大类下）`
 
 ---
@@ -88,11 +89,11 @@ W8A8（量化大类：Weight 8-bit + Activation 8-bit）
 
 | 项目 | CUDA | NPU |
 |------|------|-----|
-| **算子** | `per_block_cast_to_fp8(weight, group_size=128)` | `torch_npu.npu_dynamic_mx_quant(weight, output_dtype)` |
+| **算子** | `per_block_cast_to_fp8(weight, group_size=128)` | `torch_npu.npu_dynamic_mx_quant(weight, dst_type)` |
 | **文件位置** | `models_py/kernels/cuda/fp8_kernel/fp8_kernel.py` L329 | `torch_npu` 原生算子 |
 | **输入** | BF16/FP16 权重 `[M, N]` | BF16 权重 `[M, N]` |
 | **输出** | FP8 E4M3 权重 + FP32 scale | FP8 E4M3 权重 + **E8M0 scale** |
-| **block 大小** | 可配置（默认 128） | 固定 128×128 |
+| **group_size** | 可配置（默认 128） | 固定 32（vllm-ascend 标准） |
 | **scale 格式** | FP32（需转换） | E8M0（原生，无需转换） |
 
 **代码对比**：
@@ -102,14 +103,14 @@ W8A8（量化大类：Weight 8-bit + Activation 8-bit）
 weight_fp8, scale_fp32 = per_block_cast_to_fp8(weight, group_size=128)
 # 后续需要 requant_weight_ue8m0 转换 scale 格式
 
-# NPU 实现
-weight_fp8, scale_e8m0 = torch_npu.npu_dynamic_mx_quant(weight, torch.float8_e4m3fn)
-# scale 已经是 E8M0 格式，无需额外转换
+# NPU 实现（W8_MXFP8）
+weight_fp8, scale_e8m0 = torch_npu.npu_dynamic_mx_quant(weight, dst_type=torch.float8_e4m3fn)
+# scale 已经是 E8M0 格式（uint8 存储，逻辑类型 float8_e8m0fnu），无需额外转换
 ```
 
 ---
 
-### 2.2 DenseMLP 的 MXFP8 GEMM
+### 2.2 DenseMLP 的 W8_MXFP8 GEMM
 
 | 项目 | CUDA | NPU |
 |------|------|-----|
@@ -119,6 +120,7 @@ weight_fp8, scale_e8m0 = torch_npu.npu_dynamic_mx_quant(weight, torch.float8_e4m
 | **输入** | `(input_fp8, input_scale), (weight_fp8, weight_scale)` | `x, weight_fp8, scale` |
 | **输出** | BF16 结果 | BF16 结果 |
 | **scale 格式** | E8M0（需 TMA 对齐） | E8M0（原生） |
+| **group_size** | 128 (CUDA默认) | 32（vllm-ascend 标准） |
 
 **代码对比**：
 
@@ -131,18 +133,22 @@ fp8_gemm_nt(
     disable_ue8m0_cast=not self.scale_ue8m0,
 )
 
-# NPU 实现
+# NPU 实现（W8_MXFP8）
 output = torch_npu.npu_quant_matmul(
     x,                    # BF16 激活
     weight_fp8,           # FP8 E4M3 权重
-    scale,                # E8M0 scale
-    dtype=torch.float8_e4m3fn
+    scale,                # E8M0 scale（uint8 存储）
+    scale_dtype=FLOAT8_E8M0FNU_DTYPE,  # 逻辑类型
+    pertoken_scale=pertoken_scale,
+    pertoken_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+    output_dtype=torch.bfloat16,
+    group_sizes=[1, 1, 32]  # group_size=32
 )
 ```
 
 ---
 
-### 2.3 MoE 的 MXFP8 Grouped GEMM
+### 2.3 MoE 的 W8_MXFP8 Grouped GEMM
 
 | 项目 | CUDA | NPU |
 |------|------|-----|
@@ -151,7 +157,8 @@ output = torch_npu.npu_quant_matmul(
 | **调用位置** | `DeepGemmMaskedExecutor` | 新增 `NpuMoEMXFP8Executor` |
 | **特点** | 分组 GEMM + masked | 分组 GEMM + 融合 SiLU 激活 |
 | **权重** | `w1[E, N, K]`, `w2[E, K, N//2]` | 同左 |
-| **scale** | `w1_scale`, `w2_scale` | 同左（E8M0 格式） |
+| **scale** | `w1_scale`, `w2_scale` | 同左（E8M0 格式，uint8 存储） |
+| **group_size** | 128 (CUDA默认) | 32（vllm-ascend 标准） |
 
 **代码对比**：
 
@@ -164,13 +171,16 @@ silu_mul_masked_fp8_post_quant_fwd(...)
 # Step 3: Down projection
 m_grouped_fp8_gemm_nt_masked(down_input, self._w2, down_output, masked_m, expected_m)
 
-# NPU 实现（融合算子，一步完成）
-output = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-    x,                    # 输入激活
-    w1,                   # gate_up_proj 权重
-    w2,                   # down_proj 权重
-    w1_scale,             # w1 的 E8M0 scale
-    w2_scale,             # w2 的 E8M0 scale
+# NPU 实现（W8_MXFP8，融合算子）
+# 参考 vllm-ascend w8a8_mxfp8.py L312-336
+output = fused_experts(
+    mxfp_act_quant_type=torch.float8_e4m3fn,
+    mxfp_weight_quant_type=torch.float8_e4m3fn,
+    mxfp_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+    mxfp_per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+    w1_scale=w1_scale,  # uint8 存储
+    w2_scale=w2_scale,  # uint8 存储
+    ...
 )
 ```
 
@@ -217,12 +227,12 @@ NPU 不需要的原因：
 
 ### 4.1 权重格式
 
-| 项目 | CUDA (DeepGEMM) | NPU (MXFP8) |
+| 项目 | CUDA (DeepGEMM) | NPU (W8_MXFP8) |
 |------|----------------|-------------|
 | 权重 dtype | `torch.float8_e4m3fn` | `torch.float8_e4m3fn` |
-| Scale dtype | `torch.float32` 或 `torch.int32`（packed E8M0） | `torch.float8_e8m0fnu` |
-| Block 大小 | 128×128 | 128×128 |
-| Scale 形状 | `[M//128, K//128]` 或 packed | `[M//128, K//128]` |
+| Scale dtype | `torch.float32` 或 `torch.int32`（packed E8M0） | `torch.uint8`（逻辑类型 `float8_e8m0fnu`） |
+| group_size | 128 (CUDA默认) | 32（vllm-ascend 标准） |
+| Scale 形状 | `[M//128, K//128]` 或 packed | `[M, K//32]`（uint8 存储） |
 
 ### 4.2 Scale 数值格式
 
@@ -235,6 +245,10 @@ NPU 原生 E8M0 的优势：
 - 无需从 FP32 转换
 - 存储量减少 4×（FP32→FP8）
 - 硬件原生支持，无需软件模拟
+
+**关键说明**：
+- **uint8 vs float8_e8m0fnu**：uint8 是物理存储类型，float8_e8m0fnu 是逻辑 dtype
+- **NPU API 参数**：通过 `scale_dtype=FLOAT8_E8M0FNU_DTYPE` 指定逻辑类型
 
 ---
 
@@ -255,28 +269,33 @@ NPU 原生 E8M0 的优势：
 
 | 算子 | 验证代码 |
 |------|---------|
-| `npu_dynamic_mx_quant` | 检查输出 dtype 为 `float8_e4m3fn` 和 `float8_e8m0fnu` |
-| `npu_quant_matmul` | 检查 MXFP8 GEMM 输出 shape 正确，dtype 为 BF16 |
+| `npu_dynamic_mx_quant` | 检查输出 dtype 为 `float8_e4m3fn` 和 scale 为 uint8（逻辑类型 E8M0） |
+| `npu_quant_matmul` | 检查 W8_MXFP8 GEMM 输出 shape 正确，dtype 为 BF16 |
 | `npu_grouped_matmul_swiglu_quant_v2` | 检查 MoE 推理结果与 BF16 基线对比 |
 
 ```python
-# 验证 NPU 算子
+# 验证 NPU 算子（W8_MXFP8）
 import torch_npu
 
 # 1. 验证动态量化
 weight = torch.randn(4096, 4096, dtype=torch.bfloat16, device="npu")
-weight_fp8, scale = torch_npu.npu_dynamic_mx_quant(weight, torch.float8_e4m3fn)
+weight_fp8, scale = torch_npu.npu_dynamic_mx_quant(weight, dst_type=torch.float8_e4m3fn)
 assert weight_fp8.dtype == torch.float8_e4m3fn
-assert scale.dtype == torch.float8_e8m0fnu
+assert scale.dtype == torch.uint8  # 物理存储类型（逻辑类型 float8_e8m0fnu）
+assert scale.shape == (4096, 4096 // 32)  # group_size=32
 
-# 2. 验证 MXFP8 GEMM (DenseMLP)
+# 2. 验证 W8_MXFP8 GEMM (DenseMLP)
 x = torch.randn(128, 4096, dtype=torch.bfloat16, device="npu")
-output = torch_npu.npu_quant_matmul(x, weight_fp8, scale, dtype=torch.float8_e4m3fn)
+output = torch_npu.npu_quant_matmul(
+    x, weight_fp8, scale,
+    scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+    output_dtype=torch.bfloat16,
+    group_sizes=[1, 1, 32]
+)
 assert output.dtype == torch.bfloat16
 assert output.shape == (128, 4096)
 
-# 3. 验证 MXFP8 Grouped GEMM (MoE) — 需要实际 torch_npu 参数
-# 参数格式需查阅 torch_npu 官方文档确认
+# 3. 验证 W8_MXFP8 Grouped GEMM (MoE)
 E = 8  # num_experts
 M = 128  # num_tokens
 K = 4096  # hidden_size
@@ -284,10 +303,10 @@ N = 4096 * 2  # intermediate_size * 2
 
 w1 = torch.randn(E, N, K, dtype=torch.float8_e4m3fn, device="npu")
 w2 = torch.randn(E, K, N // 2, dtype=torch.float8_e4m3fn, device="npu")
-w1_scale = torch.ones(E, N // 128, K // 128, dtype=torch.float8_e8m0fnu, device="npu")
-w2_scale = torch.ones(E, K // 128, N // 256, dtype=torch.float8_e8m0fnu, device="npu")
+w1_scale = torch.ones(E, N, K // 32, dtype=torch.uint8, device="npu")  # group_size=32
+w2_scale = torch.ones(E, K, N // 64, dtype=torch.uint8, device="npu")
 
-# MoE 算子调用（参数格式需验证）
+# MoE 算子调用（参考 vllm-ascend w8a8_mxfp8.py）
 # output = torch_npu.npu_grouped_matmul_swiglu_quant_v2(...)
 ```
 
@@ -299,13 +318,20 @@ w2_scale = torch.ones(E, K // 128, N // 256, dtype=torch.float8_e8m0fnu, device=
 
 | 变化 | 说明 | 适配状态 |
 |------|------|---------|
+| 方案名称 | FP8 Per-Block → W8_MXFP8 | ❌🔴 |
 | 算子来源 | DeepGEMM → torch_npu | ❌🔴 |
 | Scale 格式 | FP32 + 转换 → E8M0 原生 | ❌🔴 |
+| group_size | 128 (CUDA默认) → 32（vllm-ascend 标准） | ❌🔴 |
 | MoE 融合 | 3 步分开执行 → 1 步融合算子 | ❌🔴 |
 | 代码简化 | 移除 `requant_weight_ue8m0` 转换逻辑 | ❌🔴 |
 
 > ✅🟢 **已适配基础部分**：DeviceType.Ascend 枚举、AscendImpl 基础框架（`get_device_id`、`_get_mem_info`、`support_dio_load`）、AscendImpl 注册、AscendF16Linear、MoE BF16 Fallback、HCCL 链接配置已在开发版本中适配。
 >
-> ❌🔴 **未适配核心部分**：MXFP8 量化的 3 个核心算子替换（`per_block_cast_to_fp8` → `npu_dynamic_mx_quant`、DeepGEMM → `npu_quant_matmul`、DeepGEMM masked → `npu_grouped_matmul_swiglu_quant_v2`）和 1 处移除（`requant_weight_ue8m0`）均未完成。
+> ❌🔴 **未适配核心部分**：W8_MXFP8 量化的 3 个核心算子替换（`per_block_cast_to_fp8` → `npu_dynamic_mx_quant`、DeepGEMM → `npu_quant_matmul`、DeepGEMM masked → `npu_grouped_matmul_swiglu_quant_v2`）和 1 处移除（`requant_weight_ue8m0`）均未完成。
+
+**关键参数**：
+- **方案名称**：W8_MXFP8（与 vllm-ascend 命名一致）
+- **group_size**：32（vllm-ascend 标准）
+- **scale 存储**：uint8（逻辑类型 float8_e8m0fnu/E8M0）
 
 核心替换只有 **3 个算子** + **1 处移除**，迁移成本较低。

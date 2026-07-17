@@ -50,7 +50,7 @@ W8A8（量化大类：Weight 8-bit + Activation 8-bit）
 │   ├── W8A8_INT8（SmoothQuant）
 │   └── W8A8_MXFP8（权重 FP8 + 激活 FP8）
 ├── W8 子类（权重-only：仅权重量化）
-│   ├── W8_MXFP8 ← 当前 RTP-LLM 实现（Weight-only FP8 BlockWise）
+│   ├── W8_MXFP8 ← 当前 RTP-LLM 实现（Weight-only FP8，group_size=32）
 │   ├── W8_INT8
 │   └── ...
 └── A8 子类（激活-only：仅激活量化）
@@ -65,7 +65,8 @@ W8A8（量化大类：Weight 8-bit + Activation 8-bit）
 
 - **量化类型**：Weight-only 8-bit（W8 子类）
 - **数据格式**：FP8 E4M3（权重）+ BF16（激活）
-- **量化方式**：BlockWise（128×128 block）+ E8M0 scale
+- **量化方式**：W8_MXFP8（group_size=32）+ E8M0 scale
+- **命名来源**：与 vllm-ascend 的 `@register_scheme("W8A8_MXFP8", ...)` 命名一致
 - **代码标记**：`# W8_MXFP8: Weight-only FP8 Quantization（W8A8 大类下）`
 
 ---
@@ -74,7 +75,7 @@ W8A8（量化大类：Weight 8-bit + Activation 8-bit）
 
 ### 1.1 目标
 
-将 RTP-LLM 的 FP8 BlockWise 量化移植到 NPU MXFP8，支持**静态量化**和**动态量化**两条路径。
+将 RTP-LLM 的 FP8 Per-Block 量化移植到 NPU W8_MXFP8，支持**静态量化**和**动态量化**两条路径。
 
 ### 1.2 核心替换
 
@@ -129,24 +130,24 @@ class AscendImpl(GpuImpl):
         # NPU 架构版本，用于条件判断
         return 910  # Ascend 910
 
-    def per_block_cast_to_fp8(self, weight, group_size=128):
-        """🔄 ❌🔴 替换：使用 NPU 原生 MXFP8 量化算子
+    def per_block_cast_to_fp8(self, weight, group_size=32):
+        """🔄 ❌🔴 替换：使用 NPU 原生 W8_MXFP8 量化算子
 
         CUDA 原实现: per_block_cast_to_fp8(weight, group_size) → FP8 + FP32 scale
         NPU 替代: torch_npu.npu_dynamic_mx_quant → FP8 + E8M0 scale (原生)
 
         Args:
             weight: BF16/FP16 权重 tensor [M, N]
-            group_size: block 大小 (128, NPU 固定)
+            group_size: block 大小 (默认 32，vllm-ascend 标准)
 
         Returns:
-            (weight_fp8, scale_e8m0)
+            (weight_fp8, scale)
             weight_fp8: torch.float8_e4m3fn [M, N]
-            scale_e8m0: torch.float8_e8m0fnu [M//128, N//128]
+            scale: torch.uint8 [M, N//32] (存储为 uint8，逻辑类型 E8M0)
         """
         weight_fp8, scale = torch_npu.npu_dynamic_mx_quant(
             weight,
-            torch.float8_e4m3fn  # 输出 dtype
+            dst_type=torch.float8_e4m3fn  # 输出 dtype
         )
         return weight_fp8, scale
 
@@ -216,7 +217,7 @@ def is_deep_gemm_e8m0_used() -> bool:
 ```python
 class Fp8BlockWiseQuantConfig(QuantizationConfig):
     # ✅ 保留，不修改核心逻辑
-    DEFAULT_FP8_QUANT_BLOCK_SIZE = 128
+    DEFAULT_FP8_QUANT_BLOCK_SIZE = 32  # 更正为 32（vllm-ascend 标准）
 
     @classmethod
     def get_method(cls) -> str:
@@ -270,7 +271,7 @@ class ModelSlimConfig(QuantizationConfig):
     - FLOAT: 未量化
     """
 
-    def __init__(self, bits=8, group_size=128, is_quanted=True, **kwargs):
+    def __init__(self, bits=8, group_size=32, is_quanted=True, **kwargs):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
 
     @classmethod
@@ -382,10 +383,10 @@ def _load_raw_tensor(self, tensor_source, layer_id, device, load_config):
     if self.scale:
         # 🔄 ❌🔴 NPU 替换: per_block_cast_to_fp8 → npu_dynamic_mx_quant
         if isinstance(load_config.exported_device, AscendImpl):
-            # NPU 路径: 原生 MXFP8 量化, 直接输出 E8M0 scale
+            # NPU 路径: 原生 W8_MXFP8 量化, 直接输出 E8M0 scale
             quant_kernel, scale = torch_npu.npu_dynamic_mx_quant(
                 kernel.get(self.kernel.name),
-                torch.float8_e4m3fn
+                dst_type=torch.float8_e4m3fn
             )
         else:
             # CUDA 路径: 保留原实现
@@ -558,7 +559,7 @@ from rtp_llm.models_py.modules.factory.linear.linear import Linear
 
 
 class NpuFp8MXFP8Linear(Linear):
-    """NPU MXFP8 Linear 层
+    """NPU W8_MXFP8 Linear 层
 
     替换 CUDA CudaFp8DeepGEMMLinear (fp8_deepgemm_linear.py L171)
 
@@ -573,7 +574,7 @@ class NpuFp8MXFP8Linear(Linear):
 
     @classmethod
     def can_handle(cls, quant_config, weight, weight_scales, **kwargs) -> bool:
-        """匹配条件: FP8 BlockWise 量化 + FP8 权重"""
+        """匹配条件: W8_MXFP8 量化 + FP8 权重"""
         if weight_scales is None or quant_config is None:
             return False
         if weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
@@ -585,11 +586,11 @@ class NpuFp8MXFP8Linear(Linear):
     def __init__(self, weight, weight_scales, bias=None, **kwargs):
         super().__init__(weight=weight, weight_scales=weight_scales, bias=bias)
         self.weight = weight          # FP8 E4M3 [N, K]
-        self.weight_scale = weight_scales  # E8M0 [N//128, K//128]
+        self.weight_scale = weight_scales  # E8M0 [N, K//32] (uint8存储)
         self.bias = bias
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        """MXFP8 GEMM 前向
+        """W8_MXFP8 GEMM 前向
 
         Args:
             input: BF16 [M, K] 或 FP8 [M, K]
@@ -601,32 +602,33 @@ class NpuFp8MXFP8Linear(Linear):
 
         # 1. 在线量化输入 (如果输入是 BF16)
         if input.dtype == torch.bfloat16:
-            input_fp8, input_scale = torch_npu.npu_dynamic_mx_quant(
+            input_fp8, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
                 input,
-                torch.float8_e4m3fn
+                dst_type=torch.float8_e4m3fn
             )
         elif input.dtype == torch.float8_e4m3fn:
             input_fp8 = input
             # 构造全 1.0 的 scale (E8M0 格式)
-            input_scale = torch.ones(
-                M // 128, K // 128,
-                dtype=torch.float8_e8m0fnu,
+            pertoken_scale = torch.ones(
+                M, K // 32,
+                dtype=torch.uint8,
                 device=input.device
             )
         else:
             raise ValueError(f"Unsupported input dtype: {input.dtype}")
 
-        # 2. NPU MXFP8 GEMM
+        # 2. NPU W8_MXFP8 GEMM
         output = torch_npu.npu_quant_matmul(
             input_fp8,           # [M, K] FP8
             self.weight,         # [N, K] FP8
-            self.weight_scale,   # [N//128, K//128] E8M0
-            dtype=torch.float8_e4m3fn
+            self.weight_scale,   # [N, K//32] E8M0 (uint8存储)
+            scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            pertoken_scale=pertoken_scale,
+            pertoken_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            bias=self.bias,
+            output_dtype=torch.bfloat16,
+            group_sizes=[1, 1, 32]  # group_size=32
         )
-
-        # 3. 加 bias
-        if self.bias is not None:
-            output = output + self.bias.to(output.dtype)
 
         return output  # [M, N] BF16
 ```
@@ -643,7 +645,7 @@ import torch_npu
 
 
 class NpuMoEMXFP8Executor:
-    """NPU MXFP8 MoE Executor
+    """NPU W8_MXFP8 MoE Executor
 
     替换 CUDA DeepGemmMaskedExecutor (deepgemm_masked_executor.py)
 
@@ -672,8 +674,8 @@ class NpuMoEMXFP8Executor:
         self._w1 = weights[W.moe_w1]       # [E, N, K] FP8
         self._w2 = weights[W.moe_w2]       # [E, K, N//2] FP8
         self._E, self._N, self._K = self._w1.size()
-        self._w1_scale = weights.get(W.moe_s1, None)  # E8M0
-        self._w2_scale = weights.get(W.moe_s2, None)  # E8M0
+        self._w1_scale = weights.get(W.moe_s1, None)  # E8M0 (uint8存储)
+        self._w2_scale = weights.get(W.moe_s2, None)  # E8M0 (uint8存储)
         self._use_fp8 = quant_config.is_quanted() or not quant_config.is_quanted()
         # (静态和动态都使用 FP8 推理)
 
@@ -689,35 +691,38 @@ class NpuMoEMXFP8Executor:
         expected_m = min(M, payload.expert_tokens_meta.expected_m)
 
         # ======== 方案 A: 融合算子 (优先) ========
+        # 参考 vllm-ascend w8a8_mxfp8.py L312-336
         try:
-            down_output = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-                x=expert_x,                    # [E, M, K] FP8
-                weight=self._w1,               # [E, N, K] FP8
-                weight_scale=self._w1_scale,   # [E, N//128, K//128] E8M0
-                x_scale=expert_x_scale,       # [E, M//128, K//128] E8M0
-                dtype=torch.float8_e4m3fn,
-                # 融合 GEMM + SwiGLU + 量化
-            )
-            # 还需第二次 GEMM (down)
-            output = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-                x=down_output,
-                weight=self._w2,
-                weight_scale=self._w2_scale,
-                dtype=torch.float8_e4m3fn,
+            down_output = fused_experts(
+                hidden_states=expert_x,
+                w1=self._w1,
+                w2=self._w2,
+                quant_type=QuantType.MXFP8,
+                mxfp_act_quant_type=torch.float8_e4m3fn,
+                mxfp_weight_quant_type=torch.float8_e4m3fn,
+                mxfp_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                mxfp_per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                w1_scale=self._w1_scale,  # uint8 存储
+                w2_scale=self._w2_scale,  # uint8 存储
+                ...
             )
         # ======== 方案 B: 分步执行 (降级) ========
         except Exception:
             # Step 1: Gate-Up GEMM
             upgate_output = torch_npu.npu_grouped_matmul_quant(
                 expert_x, self._w1, self._w1_scale,
-                dtype=torch.float8_e4m3fn
+                scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                output_dtype=torch.bfloat16,
+                group_sizes=[1, 1, 32]
             )
             # Step 2: SiLU + Mul + 量化
             down_input, down_input_scale = self._silu_mul_and_quant(upgate_output)
             # Step 3: Down GEMM
             output = torch_npu.npu_grouped_matmul_quant(
                 down_input, self._w2, self._w2_scale,
-                dtype=torch.float8_e4m3fn
+                scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                output_dtype=torch.bfloat16,
+                group_sizes=[1, 1, 32]
             )
 
         return CombineForwardPayload(fused_expert_output=output)
@@ -730,7 +735,7 @@ class NpuMoEMXFP8Executor:
         act = torch.nn.functional.silu(gate) * up
         # 量化
         act_fp8, act_scale = torch_npu.npu_dynamic_mx_quant(
-            act, torch.float8_e4m3fn
+            act, dst_type=torch.float8_e4m3fn
         )
         return act_fp8, act_scale
 ```
@@ -769,8 +774,8 @@ class NpuMoEMXFP8Executor:
 
 | 库 | 用途 | 处理方式 |
 |----|------|---------|
-| DeepGEMM | FP8 BlockWise GEMM | 🗑️❌🔴 移除，`npu_quant_matmul` 替代 |
-| `torch._scaled_mm` | FP8 PerTensor GEMM | 🗑️❌🔴 MXFP8 场景移除 |
+| DeepGEMM | FP8 Per-Block GEMM | 🗑️❌🔴 移除，`npu_quant_matmul` 替代 |
+| `torch._scaled_mm` | FP8 PerTensor GEMM | 🗑️❌🔴 W8_MXFP8 场景移除 |
 
 ### 6.3 可保留的第三方库
 
@@ -861,12 +866,17 @@ assert weight_fp8.shape == weight.shape
 #### 推理层 ❌🔴
 
 ```python
-# ❌🔴 验证 Linear
+# ❌🔴 验证 Linear（W8_MXFP8）
 x = torch.randn(128, 4096, dtype=torch.bfloat16, device="npu")
 weight_fp8 = torch.randn(4096, 4096, dtype=torch.float8_e4m3fn, device="npu")
-scale = torch.ones(32, 32, dtype=torch.float8_e8m0fnu, device="npu")
+scale = torch.ones(4096, 4096 // 32, dtype=torch.uint8, device="npu")  # group_size=32
 
-output = torch_npu.npu_quant_matmul(x, weight_fp8, scale, dtype=torch.float8_e4m3fn)
+output = torch_npu.npu_quant_matmul(
+    x, weight_fp8, scale,
+    scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+    output_dtype=torch.bfloat16,
+    group_sizes=[1, 1, 32]
+)
 assert output.dtype == torch.bfloat16
 assert output.shape == (128, 4096)
 ```
