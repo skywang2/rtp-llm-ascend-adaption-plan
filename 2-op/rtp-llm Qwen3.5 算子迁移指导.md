@@ -33,7 +33,7 @@
 | recompute_w_u_fwd | recompute_w_u_fwd | FLA（AscendC） | https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/chunk_gdn_fwd/recompute_w_u_fwd | https://github.com/ningweikang/rtp-llm/pull/27 |
 | chunk_fwd_o | chunk_fwd_o | FLA（AscendC） | https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o | https://github.com/ningweikang/rtp-llm/pull/28 |
 | fused_recurrent_gated_delta_rule | recurrent_gated_delta_rule | FLA（AscendC） | https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/recurrent_gdn/recurrent_gated_delta_rule | https://github.com/ningweikang/rtp-llm/pull/28 |
-| fused_gdn_gating | fused_gdn_gating | 自定义 Triton 算子 | triton 源码迁移 | https://github.com/ningweikang/rtp-llm/pull/29 |
+| fused_gdn_gating | fused_gdn_gating | 自定义 Triton 算子 | triton 源码迁移 | https://github.com/ningweikang/rtp-llm/pull/33 |
 | chunk_gated_delta_rule | chunk_gated_delta_rule_fwd_h | FLA（AscendC） | https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h | https://github.com/ningweikang/rtp-llm/pull/29 |
 | solve_tril | solve_tri | FLA（AscendC） | https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/chunk_gdn_fwd/solve_tri | https://github.com/ningweikang/rtp-llm/pull/29 |
 | l2norm_fwd | l2norm_fwd | FLA（Triton） | https://github.com/flashserve/flash-linear-attention-npu/blob/main/fla/ops/triton/triton_core/l2norm.py | https://github.com/ningweikang/rtp-llm/pull/32 |
