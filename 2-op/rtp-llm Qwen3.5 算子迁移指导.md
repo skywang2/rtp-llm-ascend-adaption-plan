@@ -1,46 +1,46 @@
 # rtp-llm Qwen3.5 算子迁移指导
 
-> **AscendC 类**：有原生 AscendC 实现（来自 [flash-linear-attention-npu](https://github.com/flashserve/flash-linear-attention-npu)代码仓，以下简称FLA），以 Python 包装 `fla_npu.ops.ascendc` 调用；不存在独立算子包中的AscendC算子，会采取单独迁移的方式。
+> **AscendC 类**：有原生 AscendC 实现（来自 [flash-linear-attention-npu](https://github.com/flashserve/flash-linear-attention-npu) 代码仓，以下简称 FLA），以 Python 包装 `fla_npu.ops.ascendc` 调用；不存在独立算子包中的 AscendC 算子，会采取单独迁移的方式。
+>
+> **Triton 类**：flash-linear-attention-npu 仓中也有 triton 实现的算子，如果等价将优先使用；无等价实现时，移植原有的 Triton kernel 到 `triton_kernels/`，经 triton-ascend JIT 在 NPU 上运行。
+>
+> 算子移植方案优先级：1. torch_npu 2. FLA（AscendC） 3. FLA（Triton） 4. 自定义 Triton 算子 5. 自定义 AscendC 算子
 
-> **Triton 类**：flash-linear-attention-npu 仓中也有triton实现的算子，如果等价将优先使用；无等价实现时，移植原有的 Triton kernel 到 `triton_kernels/`，经 triton-ascend JIT 在 NPU 上运行。
-
-> 算子移植方案优先级：1. torch\_npu 2. FLA（AscendC） 3. FLA（Triton） 4. 自定义 Triton 算子 5. 自定义 AscendC 算子
-
-***
+---
 
 ## 第 1 章 NPU 算子来源分类
 
-| NPU 算子来源分类（按使用优先级排序） | 典型代表                              |
-| -------------------- | --------------------------------- |
-| torch\_npu           | torch.searchsorted                |
-| FLA（AscendC）         | causal\_conv1d                    |
-| FLA（Triton）          | l2norm                            |
-| 自定义 Triton 算子        | store\_ssm\_state\_to\_block\_map |
-| 自定义 AscendC 算子       | 不在上述类别需要AscendC开发的算子              |
+| NPU 算子来源分类（按使用优先级排序） | 典型代表 |
+|---|---|
+| torch_npu | torch.searchsorted |
+| FLA（AscendC） | causal_conv1d |
+| FLA（Triton） | l2norm |
+| 自定义 Triton 算子 | store_ssm_state_to_block_map |
+| 自定义 AscendC 算子 | 不在上述类别需要 AscendC 开发的算子 |
 
-***
+---
 
 ## 第 2 章 算子迁移速查
 
 ### 线性注意力算子
 
-| GPU 算子                                 | NPU 对应算子                               | NPU 算子来源      | 算子说明文档                                                                                                                              | 测试用例                                                                                             |
-| -------------------------------------- | -------------------------------------- | ------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| causal\_conv1d\_fn                     | causal\_conv1d                         | FLA（AscendC）  | <https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/gdn_preprocess/causal_conv1d>               | <https://github.com/ningweikang/rtp-llm/pull/24>                                                 |
-| causal\_conv1d\_update                 | causal\_conv1d                         | FLA（AscendC）  | <https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/gdn_preprocess/causal_conv1d>               | <https://github.com/ningweikang/rtp-llm/pull/24>                                                 |
-| chunk\_local\_cumsum                   | chunk\_local\_cumsum                   | FLA（AscendC）  | <https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_local_cumsum>           | <https://github.com/ningweikang/rtp-llm/pull/26>                                                 |
-| chunk\_scaled\_dot\_kkt\_fwd           | chunk\_scaled\_dot\_kkt                | FLA（AscendC）  | <https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_scaled_dot_kkt>         | <https://github.com/ningweikang/rtp-llm/pull/28>                                                 |
-| recompute\_w\_u\_fwd                   | recompute\_w\_u\_fwd                   | FLA（AscendC）  | <https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/chunk_gdn_fwd/recompute_w_u_fwd>            | <https://github.com/ningweikang/rtp-llm/pull/27>                                                 |
-| chunk\_fwd\_o                          | chunk\_fwd\_o                          | FLA（AscendC）  | <https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o>                  | <https://github.com/ningweikang/rtp-llm/pull/28>                                                 |
-| fused\_recurrent\_gated\_delta\_rule   | recurrent\_gated\_delta\_rule          | FLA（AscendC）  | <https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/recurrent_gdn/recurrent_gated_delta_rule>   | <https://github.com/ningweikang/rtp-llm/pull/28>                                                 |
-| fused\_gdn\_gating                     | fused\_gdn\_gating                     | 自定义 Triton 算子 | triton 源码迁移                                                                                                                         | [https://github.com/ningweikang/rtp-llm/pull/33](https://github.com/ningweikang/rtp-llm/pull/29) |
-| chunk\_gated\_delta\_rule              | chunk\_gated\_delta\_rule\_fwd\_h      | FLA（AscendC）  | <https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h> | <https://github.com/ningweikang/rtp-llm/pull/29>                                                 |
-| solve\_tril                            | solve\_tri                             | FLA（AscendC）  | <https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/chunk_gdn_fwd/solve_tri>                    | <https://github.com/ningweikang/rtp-llm/pull/29>                                                 |
-| l2norm\_fwd                            | l2norm\_fwd                            | FLA（Triton）   | <https://github.com/flashserve/flash-linear-attention-npu/blob/main/fla/ops/triton/triton_core/l2norm.py>                           | <https://github.com/ningweikang/rtp-llm/pull/32>                                                 |
-| load\_initial\_state\_from\_block\_map | load\_initial\_state\_from\_block\_map | 自定义 Triton 算子 | triton 源码迁移                                                                                                                         | <https://github.com/ningweikang/rtp-llm/pull/31>                                                 |
-| store\_ssm\_state\_to\_block\_map      | store\_ssm\_state\_to\_block\_map      | 自定义 Triton 算子 | triton 源码迁移                                                                                                                         | <https://github.com/ningweikang/rtp-llm/pull/31>                                                 |
+| GPU 算子 | NPU 对应算子 | NPU 算子来源 | 算子说明文档 | 测试用例 |
+|---|---|---|---|---|
+| causal_conv1d_fn | causal_conv1d | FLA（AscendC） | https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/gdn_preprocess/causal_conv1d | https://github.com/ningweikang/rtp-llm/pull/24 |
+| causal_conv1d_update | causal_conv1d | FLA（AscendC） | https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/gdn_preprocess/causal_conv1d | https://github.com/ningweikang/rtp-llm/pull/24 |
+| chunk_local_cumsum | chunk_local_cumsum | FLA（AscendC） | https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_local_cumsum | https://github.com/ningweikang/rtp-llm/pull/26 |
+| chunk_scaled_dot_kkt_fwd | chunk_scaled_dot_kkt | FLA（AscendC） | https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_scaled_dot_kkt | https://github.com/ningweikang/rtp-llm/pull/28 |
+| recompute_w_u_fwd | recompute_w_u_fwd | FLA（AscendC） | https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/chunk_gdn_fwd/recompute_w_u_fwd | https://github.com/ningweikang/rtp-llm/pull/27 |
+| chunk_fwd_o | chunk_fwd_o | FLA（AscendC） | https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o | https://github.com/ningweikang/rtp-llm/pull/28 |
+| fused_recurrent_gated_delta_rule | recurrent_gated_delta_rule | FLA（AscendC） | https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/recurrent_gdn/recurrent_gated_delta_rule | https://github.com/ningweikang/rtp-llm/pull/28 |
+| fused_gdn_gating | fused_gdn_gating | 自定义 Triton 算子 | triton 源码迁移 | https://github.com/ningweikang/rtp-llm/pull/33 |
+| chunk_gated_delta_rule | chunk_gated_delta_rule_fwd_h | FLA（AscendC） | https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h | https://github.com/ningweikang/rtp-llm/pull/29 |
+| solve_tril | solve_tri | FLA（AscendC） | https://github.com/flashserve/flash-linear-attention-npu/tree/main/fla/ops/ascendc/gdn/chunk_gdn_fwd/solve_tri | https://github.com/ningweikang/rtp-llm/pull/29 |
+| l2norm_fwd | l2norm_fwd | FLA（Triton） | https://github.com/flashserve/flash-linear-attention-npu/blob/main/fla/ops/triton/triton_core/l2norm.py | https://github.com/ningweikang/rtp-llm/pull/32 |
+| load_initial_state_from_block_map | load_initial_state_from_block_map | 自定义 Triton 算子 | triton 源码迁移 | https://github.com/ningweikang/rtp-llm/pull/31 |
+| store_ssm_state_to_block_map | store_ssm_state_to_block_map | 自定义 Triton 算子 | triton 源码迁移 | https://github.com/ningweikang/rtp-llm/pull/31 |
 
-***
+---
 
 ## 第 3 章 fla 算子迁移
 
@@ -60,19 +60,19 @@ python -m pip install --force-reinstall --no-deps dist/flash_linear_attention_np
 python -c "from fla_npu.ops import ascendc; print('ok')"
 ```
 
-| 关键环境变量                        | 作用                                           |
-| ----------------------------- | -------------------------------------------- |
-| `FLA_NPU_SOC`                 | 目标芯片：`ascend910b`/`ascend910_93`/`ascend950` |
-| `FLA_NPU_INCREMENTAL_BUILD=1` | 增量构建（本地调试）                                   |
-| `FLA_NPU_OPS=op1,op2`         | 仅构建指定算子（勿用于 release）                         |
+| 关键环境变量 | 作用 |
+|---|---|
+| `FLA_NPU_SOC` | 目标芯片：`ascend910b`/`ascend910_93`/`ascend950` |
+| `FLA_NPU_INCREMENTAL_BUILD=1` | 增量构建（本地调试） |
+| `FLA_NPU_OPS=op1,op2` | 仅构建指定算子（勿用于 release） |
 
-> wheel 内嵌 OPP，通过绝对路径加载 `libcust_opapi.so`；不自动装 torch/torch\_npu/triton-ascend，需自行匹配版本。
+> wheel 内嵌 OPP，通过绝对路径加载 `libcust_opapi.so`；不自动装 torch/torch_npu/triton-ascend，需自行匹配版本。
 
 ### 3.2 迁移步骤
 
 1. **装 wheel**：按 3.1 完成安装，确认 `import fla_npu.ops.ascendc` 可用。
 2. **查算子签名**：在第 2 章速查表中找到对应 GPU 算子 → 点开"算子说明文档"链接，查看 AscendC API 参数签名。
-3. **建包装层**：在 [rtp\_llm/models\_py/](../../rtp-llm-npu/rtp_llm/models_py/) 下提供与 Triton **同名接口** + device 分发（NPU→ascendc），按第 2 章算子 API 签名做参数适配。
+3. **建包装层**：在 [rtp_llm/models_py/](../../rtp-llm-npu/rtp_llm/models_py/) 下提供与 Triton **同名接口** + device 分发（NPU→ascendc），按第 2 章算子 API 签名做参数适配。
 4. **模型层接入**：把 `from ...triton_kernels.xxx import yyy` 改为从包装层导入（签名不变）。
 
 **包装层骨架**（device 分发 + 布局适配，以 `causal_conv1d` 为例）：
@@ -104,11 +104,11 @@ def causal_conv1d_fn(x, weight, bias, conv_states, query_start_loc, block_map,
     return y.T.to(x.dtype)
 ```
 
-***
+---
 
 ## 第 4 章 自定义 Triton 算子迁移
 
-> **背景**：rtp-llm 框架内有部分 Triton 算子（如 `load_initial_state_from_block_map`、`store_ssm_state_to_block_map`），它们既不在 torch\_npu 中，也不在 flash-linear-attention-npu 独立算子包中，因此需要直接将原有 Triton kernel 迁移到 NPU 上运行。参考案例：[PR#31](https://github.com/ningweikang/rtp-llm/pull/31)。
+> **背景**：rtp-llm 框架内有部分 Triton 算子（如 `load_initial_state_from_block_map`、`store_ssm_state_to_block_map`），它们既不在 torch_npu 中，也不在 flash-linear-attention-npu 独立算子包中，因此需要直接将原有 Triton kernel 迁移到 NPU 上运行。参考案例：[PR#31](https://github.com/ningweikang/rtp-llm/pull/31)。
 
 ### 4.1 迁移步骤
 
