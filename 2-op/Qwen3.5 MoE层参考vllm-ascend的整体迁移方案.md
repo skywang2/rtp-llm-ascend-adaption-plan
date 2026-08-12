@@ -62,7 +62,7 @@ GenericMoeLayer.forward(hidden_states)                    ← 保留 rtp-llm 框
 | `self.gate`(Router Linear) | `LinearFactory` | NPU 自动走 CANN GEMM |
 | `self.shared_expert` | `DenseMLP` | Shared Expert,保留 |
 | `self.shared_expert_gate` | `LinearFactory` | Shared Expert 门控,保留 |
-| `fake_balance_expert` | rtp-llm 实现 | 若启用则保留 |
+| `fake_balance_expert` | rtp-llm 实现 | ⚠️ **NPU 不可用**:迁移时需关闭 `moe_config.fake_balance_expert`,或另行补齐实现 |
 
 ### 2.2 替换为 vllm-ascend CANN 算子的部分
 
@@ -241,7 +241,7 @@ else:
 
 ### 步骤 5:验证
 
-1. 单卡正确性:对比 GPU 输出(atol=1e-2)
+1. 单卡正确性:对比 GPU 输出
 2. TP 多卡:`all_reduce` 结果与单卡一致
 3. 性能测试:对比 Triton kernel
 
