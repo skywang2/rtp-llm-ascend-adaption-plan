@@ -46,9 +46,9 @@ GenericMoeLayer.forward(hidden_states)                    ← 保留 rtp-llm 框
 
 | 场景 | prepare(分发) | finalize(合并) | token_dispatch |
 |---|---|---|---|
-| **单卡** | 不通信 | 不通信 | `npu_moe_init_routing_v2` |
-| **TP**(Qwen3.5 默认) | 不通信 | `all_reduce(Group.TP)` | `npu_moe_init_routing_v2` |
-| **EP** | `npu_moe_distribute_dispatch_v2`(all_to_all) | `npu_moe_distribute_combine_v2`(all_to_all) | 融合在 dispatch 算子内 |
+| **单卡** | 不通信 | 不通信 | npu_moe_init_routing_v2 |
+| **TP**(Qwen3.5 默认) | 不通信 | all_reduce(Group.TP) | npu_moe_init_routing_v2 |
+| **EP** | npu_moe_distribute_dispatch_v2(all_to_all) | npu_moe_distribute_combine_v2(all_to_all) | 融合在 dispatch 算子内 |
 
 ---
 
@@ -58,36 +58,36 @@ GenericMoeLayer.forward(hidden_states)                    ← 保留 rtp-llm 框
 
 | 组件 | rtp-llm 实现 | 说明 |
 |---|---|---|
-| `GenericMoeLayer` 框架 | `generic_moe.py` | 层入口,保留 |
-| `self.gate`(Router Linear) | `LinearFactory` | NPU 自动走 CANN GEMM |
-| `self.shared_expert` | `DenseMLP` | Shared Expert,保留 |
-| `self.shared_expert_gate` | `LinearFactory` | Shared Expert 门控,保留 |
-| `fake_balance_expert` | rtp-llm 实现 | ⚠️ **NPU 不可用**:迁移时需关闭 `moe_config.fake_balance_expert`,或另行补齐实现 |
+| GenericMoeLayer 框架 | generic_moe.py | 层入口,保留 |
+| self.gate(Router Linear) | LinearFactory | NPU 自动走 CANN GEMM |
+| self.shared_expert | DenseMLP | Shared Expert,保留 |
+| self.shared_expert_gate | LinearFactory | Shared Expert 门控,保留 |
+| fake_balance_expert | rtp-llm 实现 | ⚠️ **NPU 不可用**:迁移时需关闭 moe_config.fake_balance_expert,或另行补齐实现 |
 
 ### 2.2 替换为 vllm-ascend CANN 算子的部分
 
 | 阶段 | rtp-llm (CUDA/Triton) | vllm-ascend (NPU/CANN) | 触发位置 |
 |---|---|---|---|
-| 路由选择 | `topkGatingSoftmaxKernelLauncher` | `npu_moe_gating_top_k` (norm_type 选 softmax/sigmoid) | GenericMoeLayer.forward |
-| Token 排序 | `moe_align_block_size_torch` | `npu_moe_init_routing_v2` | fused_experts.execute |
-| GEMM1 | `invoke_fused_moe_kernel` | `npu_grouped_matmul` | fused_experts.execute |
-| 激活 | `silu_and_mul` (Triton) | `npu_swiglu` | fused_experts.execute |
-| 路由权重 | 融合在 GEMM2 | 融合在后续`npu_moe_token_unpermute` | fused_experts.execute |
-| GEMM2 | `invoke_fused_moe_kernel` | `npu_grouped_matmul` | fused_experts.execute |
-| Token 合并 | `out.view(M,topk,K).sum(1)` | `npu_moe_token_unpermute` | fused_experts.execute |
-| TP 合并 | `all_reduce(Group.TP)` | `all_reduce(Group.TP)` (保留) | router.finalize |
-| EP 分发 | (rtp-llm 无 EP) | `npu_moe_distribute_dispatch_v2` | router.prepare |
-| EP 合并 | (rtp-llm 无 EP) | `npu_moe_distribute_combine_v2` | router.finalize |
-| Shared Expert 融合 | `sigmoid_gate_scale_add_triton` | `experts + sigmoid(gate) * shared` (PyTorch) | GenericMoeLayer.forward |
+| 路由选择 | topkGatingSoftmaxKernelLauncher | npu_moe_gating_top_k (norm_type 选 softmax/sigmoid) | GenericMoeLayer.forward |
+| Token 排序 | moe_align_block_size_torch | npu_moe_init_routing_v2 | fused_experts.execute |
+| GEMM1 | invoke_fused_moe_kernel | npu_grouped_matmul | fused_experts.execute |
+| 激活 | silu_and_mul (Triton) | npu_swiglu | fused_experts.execute |
+| 路由权重 | 融合在 GEMM2 | 融合在后续npu_moe_token_unpermute | fused_experts.execute |
+| GEMM2 | invoke_fused_moe_kernel | npu_grouped_matmul | fused_experts.execute |
+| Token 合并 | out.view(M,topk,K).sum(1) | npu_moe_token_unpermute | fused_experts.execute |
+| TP 合并 | all_reduce(Group.TP) | all_reduce(Group.TP) (保留) | router.finalize |
+| EP 分发 | (rtp-llm 无 EP) | npu_moe_distribute_dispatch_v2 | router.prepare |
+| EP 合并 | (rtp-llm 无 EP) | npu_moe_distribute_combine_v2 | router.finalize |
+| Shared Expert 融合 | sigmoid_gate_scale_add_triton | sigmoid_gate_scale_add_triton (保留,triton-ascend JIT) | GenericMoeLayer.forward |
 
 ### 2.3 量化路径(可选)
 
 | 阶段 | 非量化 | 量化融合 | 量化非融合 |
 |---|---|---|---|
-| GEMM1 | `npu_grouped_matmul` | `npu_grouped_matmul_swiglu_quant` | `npu_grouped_matmul` (带 scale) |
-| 激活 | `npu_swiglu` | (融合在 GEMM1) | `npu_dequant_swiglu_quant` |
-| GEMM2 | `npu_grouped_matmul` | `npu_grouped_matmul_gmm2` | `npu_grouped_matmul_gmm2` |
-| 输入量化 | 无 | `npu_dynamic_quant` (前置) | `npu_dynamic_quant` (前置) |
+| GEMM1 | npu_grouped_matmul | npu_grouped_matmul_swiglu_quant | npu_grouped_matmul (带 scale) |
+| 激活 | npu_swiglu | (融合在 GEMM1) | npu_dequant_swiglu_quant |
+| GEMM2 | npu_grouped_matmul | npu_grouped_matmul_gmm2 | npu_grouped_matmul_gmm2 |
+| 输入量化 | 无 | npu_dynamic_quant (前置) | npu_dynamic_quant (前置) |
 
 ---
 
@@ -265,9 +265,9 @@ elif device_type == DeviceType.Ascend:
 
 | 场景 | 配置 | 走的路径 |
 |---|---|---|
-| 单卡 | `tp_size=1, ep_size=1` | 纯本地,无通信 |
-| TP | `tp_size>1, ep_size=1` | `npu_moe_init_routing_v2` + `all_reduce` |
-| EP | `ep_size>1` | `npu_moe_distribute_dispatch_v2/combine_v2` |
+| 单卡 | tp_size=1, ep_size=1 | 纯本地,无通信 |
+| TP | tp_size>1, ep_size=1 | npu_moe_init_routing_v2 + all_reduce |
+| EP | ep_size>1 | npu_moe_distribute_dispatch_v2/combine_v2 |
 
 验证:单卡对比 GPU 输出;TP 多卡 `all_reduce` 结果与单卡一致;性能对比 Triton kernel。
 
@@ -277,13 +277,13 @@ elif device_type == DeviceType.Ascend:
 
 | 维度 | rtp-llm 原始 | 迁移后 |
 |---|---|---|
-| 路由选择 | `topkGatingSoftmaxKernelLauncher` (C++) | `npu_moe_gating_top_k` (norm_type 选 softmax/sigmoid) |
-| Token 排序 | `moe_align_block_size_torch` (argsort+cumsum) | `npu_moe_init_routing_v2` (一步融合) |
-| GEMM | `invoke_fused_moe_kernel` (Triton) | `npu_grouped_matmul` (CANN) |
-| 路由权重 | 融合在 GEMM2 epilogue | `npu_moe_token_unpermute(probs=)` 统一乘 |
-| Token 合并 | `out.view(M,topk,K).sum(1)` | `npu_moe_token_unpermute` (融合 scatter+mul) |
-| Shared Expert | `sigmoid_gate_scale_add_triton` | 纯 PyTorch `sigmoid + mul + add` |
-| EP 通信 | 无(PureTpRouter) | `npu_moe_distribute_dispatch/combine_v2` (MC2) |
+| 路由选择 | topkGatingSoftmaxKernelLauncher (C++) | npu_moe_gating_top_k (norm_type 选 softmax/sigmoid) |
+| Token 排序 | moe_align_block_size_torch (argsort+cumsum) | npu_moe_init_routing_v2 (一步融合) |
+| GEMM | invoke_fused_moe_kernel (Triton) | npu_grouped_matmul (CANN) |
+| 路由权重 | 融合在 GEMM2 epilogue | npu_moe_token_unpermute(probs=) 统一乘 |
+| Token 合并 | out.view(M,topk,K).sum(1) | npu_moe_token_unpermute (融合 scatter+mul) |
+| Shared Expert | sigmoid_gate_scale_add_triton | 纯 PyTorch sigmoid + mul + add |
+| EP 通信 | 无(PureTpRouter) | npu_moe_distribute_dispatch/combine_v2 (MC2) |
 
 ---
 
