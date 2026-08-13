@@ -40,6 +40,19 @@
 | load_initial_state_from_block_map | load_initial_state_from_block_map | 自定义 Triton 算子 | triton 源码迁移 | https://github.com/ningweikang/rtp-llm/pull/31 |
 | store_ssm_state_to_block_map | store_ssm_state_to_block_map | 自定义 Triton 算子 | triton 源码迁移 | https://github.com/ningweikang/rtp-llm/pull/31 |
 
+### MoE 算子
+
+| GPU 算子 | NPU 对应算子 | NPU 算子来源 | 算子说明文档 | 测试用例 |
+|---|---|---|---|---|
+| topkGatingSoftmaxKernelLauncher | npu_moe_gating_top_k | torch_npu | https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/customapi/docs/zh/custom_APIs/torch_npu/torch_npu-npu_moe_gating_top_k.md | - |
+| moe_align_block_size_torch | npu_moe_init_routing_v2 | torch_npu | https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/customapi/docs/zh/custom_APIs/torch_npu/torch_npu-npu_moe_init_routing_v2.md | - |
+| invoke_fused_moe_kernel | npu_grouped_matmul | torch_npu | https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/customapi/docs/zh/custom_APIs/torch_npu/torch_npu-npu_grouped_matmul.md | - |
+| silu_and_mul | npu_swiglu | torch_npu | https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/customapi/docs/zh/custom_APIs/torch_npu/%EF%BC%88beta%EF%BC%89torch_npu-npu_swiglu.md | - |
+| 路由权重乘 + out.view(M,topk,K).sum(1) | npu_moe_token_unpermute # 非A5算子，如果不能使用可采用框架原有方案 | torch_npu | - | https://gitcode.com/Ascend/op-plugin/blob/master/test/test_custom_ops/test_npu_moe_token_permute_and_unpermute.py |
+| (rtp-llm 无 EP 分发) | npu_moe_distribute_dispatch_v2 | torch_npu | https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/customapi/docs/zh/custom_APIs/torch_npu/torch_npu-npu_moe_distribute_dispatch_v2.md | - |
+| (rtp-llm 无 EP 合并) | npu_moe_distribute_combine_v2 | torch_npu | https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/customapi/docs/zh/custom_APIs/torch_npu/torch_npu-npu_moe_distribute_combine_v2.md | - |
+| sigmoid_gate_scale_add_triton | sigmoid_gate_scale_add_triton | 自定义 Triton 算子 | triton 源码迁移 | https://github.com/ningweikang/rtp-llm/pull/34 |
+
 ---
 
 ## 第 3 章 fla 算子迁移
@@ -62,9 +75,9 @@ python -c "from fla_npu.ops import ascendc; print('ok')"
 
 | 关键环境变量 | 作用 |
 |---|---|
-| `FLA_NPU_SOC` | 目标芯片：`ascend910b`/`ascend910_93`/`ascend950` |
-| `FLA_NPU_INCREMENTAL_BUILD=1` | 增量构建（本地调试） |
-| `FLA_NPU_OPS=op1,op2` | 仅构建指定算子（勿用于 release） |
+| FLA_NPU_SOC | 目标芯片：ascend910b/ascend910_93/ascend950 |
+| FLA_NPU_INCREMENTAL_BUILD=1 | 增量构建（本地调试） |
+| FLA_NPU_OPS=op1,op2 | 仅构建指定算子（勿用于 release） |
 
 > wheel 内嵌 OPP，通过绝对路径加载 `libcust_opapi.so`；不自动装 torch/torch_npu/triton-ascend，需自行匹配版本。
 
