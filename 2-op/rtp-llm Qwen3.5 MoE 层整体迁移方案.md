@@ -30,7 +30,7 @@ GenericMoeLayer.forward(hidden_states)                    ← 保留 rtp-llm 框
 │      │      ├─ GEMM1: torch_npu.npu_grouped_matmul(x, w1, group_list)
 │      │      ├─ 激活:   torch_npu.npu_swiglu(gate_up_out)
 │      │      ├─ GEMM2: torch_npu.npu_grouped_matmul(x, w2, group_list)
-│      │      └─ 路由权重 + Token 合并: torch_npu.npu_moe_token_unpermute(expert_out, row_idx, probs=topk_weights) # 非A5算子，如果不能使用可采用框架原有方案
+│      │      └─ 路由权重 + Token 合并: torch_npu.npu_moe_token_unpermute(expert_out, row_idx, probs=topk_weights)
 │      │
 │      └─ 3.4 NpuRouter.finalize()                        ← 多卡合并
 │             ├─ (TP) all_reduce(output, Group.TP)        ← 多卡 all_reduce
@@ -74,7 +74,7 @@ GenericMoeLayer.forward(hidden_states)                    ← 保留 rtp-llm 框
 | 激活 | silu_and_mul (Triton) | npu_swiglu | fused_experts.execute |
 | 路由权重 | 融合在 GEMM2 | 融合在后续npu_moe_token_unpermute | fused_experts.execute |
 | GEMM2 | invoke_fused_moe_kernel | npu_grouped_matmul | fused_experts.execute |
-| Token 合并 | out.view(M,topk,K).sum(1) | npu_moe_token_unpermute # 非A5算子，如果不能使用可采用框架原有方案 | fused_experts.execute |
+| Token 合并 | out.view(M,topk,K).sum(1) | npu_moe_token_unpermute | fused_experts.execute |
 | TP 合并 | all_reduce(Group.TP) | all_reduce(Group.TP) (保留) | router.finalize |
 | EP 分发 | (rtp-llm 无 EP) | npu_moe_distribute_dispatch_v2 | router.prepare |
 | EP 合并 | (rtp-llm 无 EP) | npu_moe_distribute_combine_v2 | router.finalize |
