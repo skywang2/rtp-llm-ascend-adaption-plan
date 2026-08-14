@@ -125,7 +125,7 @@ def causal_conv1d_fn(x, weight, bias, conv_states, query_start_loc, block_map,
 
 ### 4.1 Triton-Ascend 安装
 #### 快速安装
-迁移选用的 Triton-Ascend 版本为 3.2.2，安装命令如下：
+迁移选用的 Triton-Ascend 版本为 3.2.2，Triton 版本为 3.2.0 跟随 Triton-Ascend 自动安装，安装命令如下：
 ```bash
 pip install triton-ascend==3.2.2 --extra-index-url=https://mirrors.huaweicloud.com/ascend/repos/pypi
 ```
