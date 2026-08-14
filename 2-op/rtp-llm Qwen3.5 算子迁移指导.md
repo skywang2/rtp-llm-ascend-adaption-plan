@@ -123,7 +123,14 @@ def causal_conv1d_fn(x, weight, bias, conv_states, query_start_loc, block_map,
 
 > **背景**：rtp-llm 框架内有部分 Triton 算子（如 `load_initial_state_from_block_map`、`store_ssm_state_to_block_map`），它们既不在 torch_npu 中，也不在 flash-linear-attention-npu 独立算子包中，因此需要直接将原有 Triton kernel 迁移到 NPU 上运行。参考案例：[PR#31](https://github.com/ningweikang/rtp-llm/pull/31)。
 
-### 4.1 迁移步骤
+### 4.1 Triton-Ascend 安装
+#### 快速安装
+迁移选用的 Triton-Ascend 版本为 3.2.2，安装命令如下：
+```bash
+pip install triton-ascend==3.2.2 --extra-index-url=https://mirrors.huaweicloud.com/ascend/repos/pypi
+```
+
+### 4.2 迁移步骤
 
 1. **定位 kernel**：在 rtp-llm 的 `triton_kernels/` 下找到原有 `@triton.jit` kernel 及 Python wrapper。
 2. **评估复用性**：判断 kernel 是否可直接复用，还是需要改写。
