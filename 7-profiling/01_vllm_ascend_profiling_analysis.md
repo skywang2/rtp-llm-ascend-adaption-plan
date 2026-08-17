@@ -66,6 +66,27 @@ return torch_npu.profiler.profile(
 )
 ```
 
+> #### ⚠️ 常见误解澄清：`_ExperimentalConfig` 不管「Python 还是 C++」
+>
+> `_ExperimentalConfig` 是一个**配置结构体**（不是采集函数），它配置的全是**设备侧（Ascend NPU）的采集粒度 + op 级细节 + 用户标注**，与「Python 侧还是 C++ 侧」完全无关。常见误以为「它只能采 Python 信息」是错的。
+>
+> | 字段 | 控制 | 侧 |
+> |------|------|-----|
+> | `profiler_level` (Level0/1/2) | NPU 采集深度 | 设备 |
+> | `aic_metrics` | AICore 性能计数器（PIPE_UTILIZATION 等） | 设备 |
+> | `l2_cache` | L2 cache 统计 | 设备 |
+> | `op_attr` / `record_op_args` | op 属性 / 输入参数 | op |
+> | `sys_io` / `sys_interconnection` | 系统 I/O / 互联 | 设备 |
+> | `msprof_tx` / `mstx` | 用户标注（mstx ≈ NVTX，C++ 侧打点也可采） | 标注 |
+> | `export_type` / `data_simplification` | dump 格式 / 数据简化 | 输出 |
+> | `host_sys` / `gc_detect_threshold` | host 系统 / GC | host |
+>
+> **真正决定 host 侧（含 C++）能否被采的是**：`activities=[ProfilerActivity.CPU]`。CPU 活动启用后，Kineto 注册**全局 `at::RecordFunction` 回调**，捕获所有线程的 `before()/end()` 调用。任何用 `at::RecordFunction` / `RECORD_FUNCTION` / `RTP_LLM_PROFILE_SCOPE` 标注的 C++ 代码都会被采到——与 `_ExperimentalConfig` 如何配置无关。
+>
+> 实证：在 rtp-llm 端到端调测中（见 `06_validation_record.md`），使用上述 `Level1 / AiCoreNone` 配置，trace 里仍出现了纯 C++ 事件 `engine.normal.step_work`(27ms)、`executor.model_forward`、`KVCacheManager::malloc` 等，证明 C++ 侧被完整采集。
+>
+> 若需要**更多细节**，调的是这些（而非纠结 Python/C++）：`profiler_level=Level2`（更深 kernel）、`op_attr=True`、`record_op_args=True`、`aic_metrics=ACL_AICORE_PIPE_UTILIZATION`、`l2_cache=True`、`mstx=True`。
+
 ### torch_npu API 完整清单
 
 | API | 用途 |
