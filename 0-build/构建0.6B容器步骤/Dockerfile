@@ -1,14 +1,14 @@
 # =============================================================================
 # rtp-llm Ascend NPU 推理容器镜像
 # 构建命令：
-#   docker build -t rtp-llm-a5-image:cann-9.1.0-beta3-x86_64 .
+#   docker build -t rtp-llm-a5-image:cann-9.2.0-x86_64 .
 # =============================================================================
 
 FROM quay.io/wjunlu/vllm-ascend-daily:main-a5-openEuler-x86
 
 # -------------------------- 环境变量 --------------------------
-ENV CANN_VERSION=9.1.0-beta.3 \
-    CANN_HOME=/usr/local/Ascend/cann-9.1.0-beta.3 \
+ENV CANN_VERSION=9.2.0 \
+    CANN_HOME=/usr/local/Ascend/cann-9.2.0 \
     ASCEND_TOOLKIT_LATEST_HOME=/usr/local/Ascend/ascend-toolkit/latest \
     ATB_HOME_PATH=/usr/local/Ascend/nnal/atb/latest/atb/cxx_abi_1 \
     SOC_VERSION=ascend950dt_9582 \
@@ -43,43 +43,36 @@ ENV ATB_STREAM_SYNC_EVERY_KERNEL_ENABLE=0 \
 WORKDIR /workspace
 
 # -------------------------- 阶段一：CANN Toolkit --------------------------
-# 所有安装包均从远程下载，仅 ops-transformer 使用本地包
-ARG BASE_URL=https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.1.T6
+# 所有安装包均从远程下载
+ARG BASE_URL=https://ascend.devcloud.huaweicloud.com/artifactory/cann-run-mirror/software/legacy/20260814000324571
 ARG CANN_RUN_DIR=/tmp/cann-install
 
 RUN mkdir -p ${CANN_RUN_DIR}
 
-# 下载并安装 CANN Toolkit 9.1.0-beta.3
+# 下载并安装 CANN Toolkit 9.2.0
 RUN wget -q -P ${CANN_RUN_DIR} \
-        "${BASE_URL}/Ascend-cann-toolkit_9.1.0-beta.3_linux-x86_64.run" && \
-    chmod +x ${CANN_RUN_DIR}/Ascend-cann-toolkit_9.1.0-beta.3_linux-x86_64.run && \
-    ${CANN_RUN_DIR}/Ascend-cann-toolkit_9.1.0-beta.3_linux-x86_64.run --install --quiet && \
-    rm -f ${CANN_RUN_DIR}/Ascend-cann-toolkit_9.1.0-beta.3_linux-x86_64.run
+        "${BASE_URL}/Ascend-cann-toolkit_9.2.0~weekly.20260814.01_linux-x86_64.run" && \
+    chmod +x ${CANN_RUN_DIR}/Ascend-cann-toolkit_9.2.0~weekly.20260814.01_linux-x86_64.run && \
+    ${CANN_RUN_DIR}/Ascend-cann-toolkit_9.2.0~weekly.20260814.01_linux-x86_64.run --install --quiet && \
+    rm -f ${CANN_RUN_DIR}/Ascend-cann-toolkit_9.2.0~weekly.20260814.01_linux-x86_64.run
 
 # 下载并安装 CANN 950 Ops
 RUN wget -q -P ${CANN_RUN_DIR} \
-        "${BASE_URL}/Ascend-cann-950-ops_9.1.0-beta.3_linux-x86_64.run" && \
-    chmod +x ${CANN_RUN_DIR}/Ascend-cann-950-ops_9.1.0-beta.3_linux-x86_64.run && \
-    ${CANN_RUN_DIR}/Ascend-cann-950-ops_9.1.0-beta.3_linux-x86_64.run --install --quiet && \
-    rm -f ${CANN_RUN_DIR}/Ascend-cann-950-ops_9.1.0-beta.3_linux-x86_64.run
+        "${BASE_URL}/Ascend-cann-950-ops_9.2.0~weekly.20260814.01_linux-x86_64.run" && \
+    chmod +x ${CANN_RUN_DIR}/Ascend-cann-950-ops_9.2.0~weekly.20260814.01_linux-x86_64.run && \
+    ${CANN_RUN_DIR}/Ascend-cann-950-ops_9.2.0~weekly.20260814.01_linux-x86_64.run --install --quiet && \
+    rm -f ${CANN_RUN_DIR}/Ascend-cann-950-ops_9.2.0~weekly.20260814.01_linux-x86_64.run
 
-# 安装 ops-transformer (独立算子包 — 使用本地文件)
-# 需将 cann-950-ops-transformer_9.0.0_linux-x86_64.run 放入 build context 的 local_pkgs/ 目录
-COPY local_pkgs/ ${CANN_RUN_DIR}/
-RUN chmod +x ${CANN_RUN_DIR}/cann-950-ops-transformer_9.0.0_linux-x86_64.run && \
-    ${CANN_RUN_DIR}/cann-950-ops-transformer_9.0.0_linux-x86_64.run --full --quiet && \
-    rm -f ${CANN_RUN_DIR}/cann-950-ops-transformer_9.0.0_linux-x86_64.run
-
-# profiling 头文件软链接 (CANN 9.1.0-beta.3 兼容修复)
-# CANN 9.1.0-beta.3 将 profiling 头文件装在 x86_64-linux/pkg_inc/profiling/ 下
+# profiling 头文件软链接 (CANN 9.2.0 兼容修复)
+# CANN 9.2.0 将 profiling 头文件装在 x86_64-linux/pkg_inc/profiling/ 下
 # aclnn_custom_ops 编译时依赖 include/profiling/ 路径
-RUN ln -sf /usr/local/Ascend/cann-9.1.0-beta.3/x86_64-linux/pkg_inc/profiling \
-            /usr/local/Ascend/cann-9.1.0-beta.3/include/profiling && \
-    mkdir -p /usr/local/Ascend/cann-9.1.0-beta.3/include
+RUN ln -sf /usr/local/Ascend/cann-9.2.0/x86_64-linux/pkg_inc/profiling \
+            /usr/local/Ascend/cann-9.2.0/include/profiling && \
+    mkdir -p /usr/local/Ascend/cann-9.2.0/include
 
 # 确保 cann 和 ascend-toolkit/latest 指向正确版本
-RUN ln -sfn /usr/local/Ascend/cann-9.1.0-beta.3 /usr/local/Ascend/cann && \
-    ln -sfn /usr/local/Ascend/cann-9.1.0-beta.3 /usr/local/Ascend/ascend-toolkit/latest
+RUN ln -sfn /usr/local/Ascend/cann-9.2.0 /usr/local/Ascend/cann && \
+    ln -sfn /usr/local/Ascend/cann-9.2.0 /usr/local/Ascend/ascend-toolkit/latest
 
 # -------------------------- 阶段二：Miniconda + Python 环境 --------------------------
 # 下载并安装 Miniconda
@@ -114,6 +107,12 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh && \
     pip install \
         torchvision==0.24.0+cpu \
         -f https://mirrors.aliyun.com/pytorch-wheels/cpu/
+
+# 安装 triton-ascend (Ascend NPU Triton 后端)
+RUN source /root/miniconda3/etc/profile.d/conda.sh && \
+    conda activate rtp-env && \
+    pip install triton-ascend==3.2.2 \
+        --extra-index-url=https://mirrors.huaweicloud.com/ascend/repos/pypi
 
 # 安装 CANN TBE 编译器 Python 依赖 + 推理框架核心依赖
 RUN source /root/miniconda3/etc/profile.d/conda.sh && \
@@ -164,7 +163,16 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh && \
         oss2==2.19.1 \
         pillow_heif==1.5.0 \
         pillow-avif-plugin==1.6.0 \
-        thrift==0.24.0
+        thrift==0.24.0 \
+        orjson==3.12.0 \
+        partial-json-parser==0.2.1.1.post7 \
+        dacite==1.9.2 \
+        blobfile==3.3.0 \
+        jieba==0.42.1 \
+        json5==0.15.0 \
+        nest-asyncio==1.6.0 \
+        pycryptodomex==3.23.0 \
+        lxml==6.1.2
 
 # 确保 libpython3.10.so 符号链接存在
 RUN ln -sf /root/miniconda3/envs/rtp-env/lib/libpython3.10.so.1.0 \
@@ -178,20 +186,21 @@ RUN curl -fsSL "https://mirrors.huaweicloud.com/bazel/6.4.0/bazel-6.4.0-linux-x8
 
 # -------------------------- 阶段五：运行时配置 --------------------------
 # 更新 .bashrc 中的 CANN 路径
-RUN sed -i 's|cann-9\.0\.0|cann-9.1.0-beta.3|g' /root/.bashrc
+RUN sed -i 's|cann-9\.[0-9][0-9a-z.-]*|cann-9.2.0|g' /root/.bashrc
 
 # 容器入口：source CANN 环境 -> 保持运行
 ENTRYPOINT ["/bin/bash", "-c", \
     "source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-     source /usr/local/Ascend/cann-9.1.0-beta.3/share/info/ascendnpu-ir/bin/set_env.sh && \
+     source /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh && \
      source /usr/local/Ascend/nnal/atb/set_env.sh && \
      exec \"$@\"", "--"]
 CMD ["bash"]
 
 # 元数据
 LABEL maintainer="rtp-llm" \
-      cann.version="9.1.0-beta.3" \
+      cann.version="9.2.0" \
       torch.version="2.9.0+cpu" \
       torch_npu.version="2.9.0.post3" \
+      triton-ascend.version="3.2.2" \
       python.version="3.10" \
       soc="ascend950dt_9582"
