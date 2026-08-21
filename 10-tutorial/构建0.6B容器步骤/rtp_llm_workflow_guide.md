@@ -130,10 +130,10 @@ ln -sf /usr/local/Ascend/cann-9.2.0/x86_64-linux/pkg_inc/profiling \
 
 | 包 | 命令 | 原因 |
 |---|---|---|
-| `scipy` | `pip install scipy` | bisheng relay/analysis 依赖 |
-| `attrs` | `pip install attrs` | tvm relay transform 依赖 |
-| `psutil` | `pip install psutil` | toolchain 依赖 |
-| `decorator` | `pip install decorator` | toolchain 依赖 |
+| scipy | pip install scipy | bisheng relay/analysis 依赖 |
+| attrs | pip install attrs | tvm relay transform 依赖 |
+| psutil | pip install psutil | toolchain 依赖 |
+| decorator | pip install decorator | toolchain 依赖 |
 
 ---
 
@@ -263,8 +263,8 @@ bazel --output_user_root=/workspace/work/bazel_cache build //rtp_llm:rtp_llm --c
 
 | 配置 | 作用 | 默认值 |
 |---|---|---|
-| `startup --output_user_root=<dir>` | 所有 workspace 缓存根目录 | `~/.cache/bazel/_bazel_<user>/` |
-| `build --disk_cache=<dir>` | 分布式持久编译缓存（可选，需额外配置） | 未设置则不使用 |
+| startup --output_user_root=<dir> | 所有 workspace 缓存根目录 | ~/.cache/bazel/_bazel_<user>/ |
+| build --disk_cache=<dir> | 分布式持久编译缓存（可选，需额外配置） | 未设置则不使用 |
 
 > ⚠️ `output_base` = `{output_user_root}/{workspace_hash}` —— 无需手动管理子目录，Bazel 自动为每个 workspace 分目录。
 
@@ -272,9 +272,11 @@ bazel --output_user_root=/workspace/work/bazel_cache build //rtp_llm:rtp_llm --c
 
 ## 9. 对框架包管理的修改
 
-> 以下修改确保 Bazel 构建系统使用正确的 Python 环境和 x86_64 wheel。
-> **所有路径以远程包为首选**（aliyun / pythonhosted / GitHub），仅在不
-> 可达时使用本地文件作为 fallback。
+> 以下修改确保 Bazel 构建系统使用正确的 Python 环境。
+>
+> ✅ torch / torch_npu wheel 的 aarch64→x86_64 URL 适配（`deps/http.bzl`、
+> `deps/requirements_ascend.txt`、`deps/requirements_lock_ascend.txt`）
+> 已合入上游仓库，无需手动修改。
 >
 > **执行目录**：`/workspace/work/rtp-llm-npu/`
 
@@ -295,49 +297,7 @@ bazel --output_user_root=/workspace/work/bazel_cache build //rtp_llm:rtp_llm --c
 > - `/workspace/work/torch-2.9.0+cpu-cp310-cp310-manylinux_2_28_x86_64.whl`
 > - `/workspace/work/torch_npu-2.9.0.post3-cp310-cp310-manylinux_2_28_x86_64.whl`
 
-### 9.2 `deps/http.bzl` — torch / torch_npu wheel URL aarch64 → x86_64
-
-> torch_npu 2.9.0.post3 的 x86_64 wheel 仅发布在 gitcode，pythonhosted 上无 x86_64 版本（aarch64→x86_64 替换会导致哈希路径不匹配 404）。torch 继续使用 aliyun 远程 URL。
-
-```diff
-   http_archive(
-       name = "torch_cpu_ascend",
-       urls = [
--         "https://mirrors.aliyun.com/...torch-2.9.0%2Bcpu...manylinux_2_28_aarch64.whl",
-+         "https://mirrors.aliyun.com/...torch-2.9.0%2Bcpu...manylinux_2_28_x86_64.whl",
-       ],
-   )
-
-   http_archive(
-       name = "torch_npu_ascend",
-       urls = [
--         "https://files.pythonhosted.org/.../torch_npu-2.9.0-cp310-cp310-manylinux_2_28_aarch64.whl",
-+         "https://gitcode.com/Ascend/pytorch/releases/download/v26.1.0-beta.1-pytorch2.9.0/torch_npu-2.9.0.post3-cp310-cp310-manylinux_2_28_x86_64.whl",
-       ],
-   )
-```
-
-> gitcode 的 `releases/download/<tag>/<filename>` 格式支持直接 HTTP 下载（非 SPA 路由），Bazel `http_archive` 可直接使用。
-
-### 9.3 `deps/requirements_ascend.txt` — 改为 x86_64 URL
-
-```diff
--https://mirrors.aliyun.com/...torch-2.9.0%2Bcpu...aarch64.whl
-+https://mirrors.aliyun.com/...torch-2.9.0%2Bcpu...x86_64.whl
--https://files.pythonhosted.org/...torch_npu-2.9.0...aarch64.whl
-+https://gitcode.com/Ascend/pytorch/releases/download/v26.1.0-beta.1-pytorch2.9.0/torch_npu-2.9.0.post3-cp310-cp310-manylinux_2_28_x86_64.whl
-```
-
-### 9.4 `deps/requirements_lock_ascend.txt` — 改为 x86_64 URL
-
-```diff
--torch @ https://mirrors.aliyun.com/...aarch64.whl
-+torch @ https://mirrors.aliyun.com/...x86_64.whl
--torch-npu @ https://files.pythonhosted.org/...aarch64.whl
-+torch-npu @ https://gitcode.com/Ascend/pytorch/releases/download/v26.1.0-beta.1-pytorch2.9.0/torch_npu-2.9.0.post3-cp310-cp310-manylinux_2_28_x86_64.whl
-```
-
-### 9.5 `deps/git.bzl` — GitHub 不可达时的本地替代（可选）
+### 9.2 `deps/git.bzl` — GitHub 不可达时的本地替代（可选）
 
 > ⚠️ 仅在 GitHub 网络不可达时需要。**网络正常时完全跳过此步**。
 
@@ -370,6 +330,8 @@ done
 
 ## 10. 对源码的修改
 
+> ✅ `ascend_kv_cache_write_op.py` 添加 `cache_mode="Norm"` 的修复已合入上游仓库，无需手动修改。
+>
 > **执行目录**：`/workspace/work/rtp-llm-npu/`
 
 ### 10.1 `.bazelrc` — 移除 x86_64 不支持的 ARM 编译选项 + 修改 PYTHON_BIN_PATH
@@ -412,17 +374,6 @@ done
 +if [ -d "/root/miniconda3/envs/rtp-env/bin" ]; then
 +    export PATH="/root/miniconda3/envs/rtp-env/bin:${PATH}"
 +    HOST_PYTHON="/root/miniconda3/envs/rtp-env/bin/python3"
-```
-
-### 10.5 `rtp_llm/models_py/modules/factory/attention/ascend_impl/ascend_kv_cache_write_op.py` — 添加 `cache_mode="Norm"`
-
-> `aclnnScatterPaKvCache` 算子对 Qwen3-0.6B 的 `head_dim=128`（bf16 = 256 bytes）报 `EZ0026 Invalid_Argument`。
-
-```diff
-         torch_npu.npu_scatter_pa_kv_cache(
--            key, value, k_view, v_view, slot_mapping,
-+            key, value, k_view, v_view, slot_mapping, cache_mode="Norm",
-         )
 ```
 
 ---
@@ -589,7 +540,7 @@ curl -s http://127.0.0.1:9000/v1/chat/completions \
 
 **原因**：CANN `aclnnScatterPaKvCache` 算子对 Qwen3-0.6B 的 `head_dim=128` 不兼容。
 
-**解决**：确认步骤 10.5 的 `cache_mode="Norm"` 修改已应用并重新编译安装。
+**解决**：`cache_mode="Norm"` 修复已合入上游仓库，拉取最新代码重新编译安装即可。
 
 ### Q4: `ModuleNotFoundError: rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2`
 
@@ -607,10 +558,10 @@ curl -s http://127.0.0.1:9000/v1/chat/completions \
 
 | WARNING | 说明 | 是否需要处理 |
 |---|---|---|
-| `Failed to load C++ FusedRopeKVCacheOp` | Ascend NPU 通过 Python 独立实现 | ❌ 不需要 |
-| `fuse is not valid` | 集群模式 fuse 服务发现，单机部署不适用 | ❌ 不需要 |
+| Failed to load C++ FusedRopeKVCacheOp | Ascend NPU 通过 Python 独立实现 | ❌ 不需要 |
+| fuse is not valid | 集群模式 fuse 服务发现，单机部署不适用 | ❌ 不需要 |
 | 日志重复出现多份 | 多进程架构 (1 backend + N frontend) | ❌ 不需要 |
-| `Please install pyav to use video processing functions` | 视频处理功能依赖，LLM 推理不涉及 | ❌ 不需要 |
+| Please install pyav to use video processing functions | 视频处理功能依赖，LLM 推理不涉及 | ❌ 不需要 |
 
 ---
 
@@ -618,13 +569,13 @@ curl -s http://127.0.0.1:9000/v1/chat/completions \
 
 | # | 文件 | 修改要点 |
 |---|---|---|
-| 1 | `.bazelrc` | 注释 ARM `-march`；修改 `PYTHON_BIN_PATH` |
-| 2 | `BUILD` | `py_runtime` 路径改为 rtp-env |
-| 3 | `3rdparty/py/BUILD.tpl` | `libpython3.10.so` 路径改为 rtp-env |
-| 4 | `deps/http.bzl` | aarch64→x86_64 URL；远程包首选 |
-| 5 | `deps/requirements_ascend.txt` | aarch64→x86_64 URL |
-| 6 | `deps/requirements_lock_ascend.txt` | aarch64→x86_64 URL |
-| 7 | `deps/pip.bzl` | `python_interpreter`→rtp-env；`cache-dir`→`/tmp/pip-cache` |
-| 8 | `3rdparty/aclnn_custom_ops/build_for_bazel.sh` | conda 路径 py310→rtp-env |
-| 9 | `deps/git.bzl` | GitHub remote→本地 `file://`（可选，网络正常时跳过） |
-| 10 | `rtp_llm/models_py/.../ascend_kv_cache_write_op.py` | 添加 `cache_mode="Norm"` |
+| 1 | .bazelrc | 注释 ARM -march；修改 PYTHON_BIN_PATH |
+| 2 | BUILD | py_runtime 路径改为 rtp-env |
+| 3 | 3rdparty/py/BUILD.tpl | libpython3.10.so 路径改为 rtp-env |
+| 4 | deps/pip.bzl | python_interpreter→rtp-env；cache-dir→/tmp/pip-cache |
+| 5 | 3rdparty/aclnn_custom_ops/build_for_bazel.sh | conda 路径 py310→rtp-env |
+| 6 | deps/git.bzl | GitHub remote→本地 file://（可选，网络正常时跳过） |
+
+> ✅ 已合入上游、无需再改：`deps/http.bzl`、`deps/requirements_ascend.txt`、
+> `deps/requirements_lock_ascend.txt`（aarch64→x86_64 URL）；
+> `rtp_llm/models_py/.../ascend_kv_cache_write_op.py`（`cache_mode="Norm"`）。
